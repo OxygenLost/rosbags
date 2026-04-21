@@ -23,6 +23,16 @@ To use your custom typestore during conversion, pass it to `rosbags-convert` via
      --src rosbag_without_types \
      --dst rosbag_with_types
 
+This repository also includes a vendored Livox example. The message definitions live under ``msg/livox_ros_driver2/`` and the matching typestore helper lives in ``typestores/livox.py``.
+
+.. code-block:: shell
+
+   PYTHONPATH=/path/to/rosbags/src:/path/to/rosbags \
+   python -m rosbags.convert.cli \
+     --src-typestore-ref typestores.livox:livox_typestore \
+     --src /path/to/record_ros2 \
+     --dst /path/to/record_ros1.bag
+
 .. note::
 
    Ensure Python can locate your typestore module. If you encounter ``ModuleNotFoundError``, verify that the directory containing your typestore is included in the ``PYTHONPATH`` environment variable.

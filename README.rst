@@ -74,6 +74,13 @@ Convert between rosbag versions::
    # Convert "bar", save the result as "foo.bag"
    rosbags-convert bar --dst /path/to/foo.bag
 
+   # Convert a ROS2 bag with vendored Livox custom messages to rosbag1
+   PYTHONPATH=/path/to/rosbags/src:/path/to/rosbags \
+   python -m rosbags.convert.cli \
+     --src-typestore-ref typestores.livox:livox_typestore \
+     --src /path/to/record_ros2 \
+     --dst /path/to/record_ros1.bag
+
 
 Documentation
 =============
