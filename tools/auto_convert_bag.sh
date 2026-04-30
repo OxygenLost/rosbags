@@ -46,8 +46,8 @@ if [ -d "$BAG_PATH" ] && [ -f "$BAG_PATH/metadata.yaml" ]; then
     
     export PYTHONPATH="$SCRIPT_DIR/.."
     "$VENV_PYTHON" --src "$BAG_PATH" --dst "$DST_FILE" \
-      --src-typestore-ref typestores.livox:livox_typestore \
-      --dst-typestore-ref typestores.livox:livox_typestore
+      --src-typestore-ref typestores.livox:livox_ros2_typestore \
+      --dst-typestore-ref typestores.livox:livox_ros1_typestore
     
     if [ $? -ne 0 ]; then
         echo "Conversion failed!"
@@ -78,8 +78,8 @@ if [ -f "$BAG_PATH" ] && [[ "$BAG_PATH" == *.bag ]]; then
     
     export PYTHONPATH="$SCRIPT_DIR/.."
     "$VENV_PYTHON" --src "$BAG_PATH" --dst "$DST_DIR" \
-      --src-typestore-ref typestores.livox:livox_typestore \
-      --dst-typestore-ref typestores.livox:livox_typestore
+      --src-typestore-ref typestores.livox:livox_ros1_typestore \
+      --dst-typestore-ref typestores.livox:livox_ros2_typestore
     
     if [ $? -ne 0 ]; then
         echo "Conversion failed!"

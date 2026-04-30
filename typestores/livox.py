@@ -20,9 +20,9 @@ def _get_livox_msg_dir() -> Path:
     raise FileNotFoundError(msg)
 
 
-def build_livox_typestore() -> Typestore:
-    """Create a ROS 2 Humble typestore extended with Livox messages."""
-    typestore = get_typestore(Stores.ROS2_HUMBLE)
+def build_livox_typestore(store) -> Typestore:
+    """Create a typestore extended with Livox messages."""
+    typestore = get_typestore(store)
     msg_dir = _get_livox_msg_dir()
     add_types = {}
     for msg_name in ('CustomPoint', 'CustomMsg'):
@@ -37,4 +37,5 @@ def build_livox_typestore() -> Typestore:
     return typestore
 
 
-livox_typestore = build_livox_typestore()
+livox_ros1_typestore = build_livox_typestore(Stores.ROS1_NOETIC)
+livox_ros2_typestore = build_livox_typestore(Stores.ROS2_HUMBLE)
