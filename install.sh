@@ -8,24 +8,28 @@ echo "==========================================="
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
 
-# 1. Setup Python Virtual Environment and install rosbags
-echo "[1/3] Setting up Python virtual environment..."
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+# 1. Setup Python Virtual Environment and install rosbags using uv
+echo "[1/4] Setting up Python virtual environment with uv..."
+if ! command -v uv &> /dev/null; then
+    echo "Installing uv (extremely fast Python package installer)..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source $HOME/.cargo/env
 fi
-source .venv/bin/activate
-pip install --upgrade pip
-pip install rosbags
+
+if [ ! -d ".venv" ]; then
+    uv venv .venv
+fi
+uv pip install rosbags
 
 # 2. Install the global CLI tool
-echo "[2/3] Installing global CLI tool 'rosbag-auto-convert'..."
+echo "[2/4] Installing global CLI tool 'rosbag-auto-convert'..."
 mkdir -p ~/.local/bin
 chmod +x "$SCRIPT_DIR/tools/auto_convert_bag.sh"
 ln -sf "$SCRIPT_DIR/tools/auto_convert_bag.sh" ~/.local/bin/rosbag-auto-convert
 echo "  -> Symlinked to ~/.local/bin/rosbag-auto-convert"
 
 # 3. Inject Antigravity Knowledge Item (Skill)
-echo "[3/3] Registering AI Agent Skill..."
+echo "[3/4] Registering AI Agent Skill..."
 KI_DIR="$HOME/.gemini/antigravity/knowledge/ros1_to_ros2_slam_mapping"
 mkdir -p "$KI_DIR/artifacts"
 
@@ -100,6 +104,19 @@ description: Convert ROS bags bi-directionally between ROS 1 and ROS 2. Use this
 If the user asks to convert a ROS bag or convert between ROS1 and ROS2, simply run the global command `rosbag-auto-convert <bag_path>`. It automatically detects the bag version (ROS1 vs ROS2), converts it to the other version, and fixes any QoS metadata bugs.
 CODEX_EOF
 echo "  -> Injected into $CODEX_SKILLS_DIR/SKILL.md (OpenAI Codex)"
+
+# cc-switch (Centralized Hub)
+CC_SWITCH_SKILLS_DIR="$HOME/.cc-switch/skills/rosbag-auto-convert"
+mkdir -p "$CC_SWITCH_SKILLS_DIR"
+cat << 'CC_EOF' > "$CC_SWITCH_SKILLS_DIR/SKILL.md"
+---
+name: rosbag-auto-convert
+description: Convert ROS bags bi-directionally between ROS 1 and ROS 2. Use this when the user asks to convert a ROS bag.
+---
+# ROS Bag Bi-Directional Auto-Converter
+If the user asks to convert a ROS bag or convert between ROS1 and ROS2, simply run the global command `rosbag-auto-convert <bag_path>`. It automatically detects the bag version (ROS1 vs ROS2), converts it to the other version, and fixes any QoS metadata bugs.
+CC_EOF
+echo "  -> Injected into $CC_SWITCH_SKILLS_DIR/SKILL.md (cc-switch)"
 
 echo "==========================================="
 echo " Installation Complete!"

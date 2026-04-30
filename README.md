@@ -16,10 +16,10 @@ This repository contains an automated tool for bi-directional conversion between
 
 ### What happens behind the scenes?
 When the AI runs `install.sh`, it will:
-1. Create a Python `.venv` and install required dependencies.
+1. Install `uv` (if not found), create a `.venv`, and install required dependencies instantly.
 2. Register a global command `rosbag-auto-convert` linked to `~/.local/bin`.
 3. Generate `metadata.json` and `workflow.md` directly into the Antigravity AI's `~/.gemini/antigravity/knowledge` directory.
-4. Auto-inject system prompts to `~/.cursorrules` (for Cursor), `~/CLAUDE.md` (for Claude Code), and `~/.codex/skills` (for OpenAI Codex CLI). 
+4. Auto-inject system prompts to `~/.cursorrules` (for Cursor), `~/CLAUDE.md` (for Claude Code), `~/.codex/skills` (for OpenAI Codex CLI), and `~/.cc-switch/skills` (for CC-Switch). 
 
 From that moment on, both you and the AI can use the following command from **anywhere** on the system:
 ```bash
@@ -40,10 +40,10 @@ rosbag-auto-convert /path/to/any/bag/data
 
 ### 后台会自动发生什么？
 当 AI 运行 `install.sh` 时，它会：
-1. 创建一个 Python `.venv` 虚拟环境并安装所需依赖项。
+1. 自动检测并安装超快速的 `uv` 包管理器，创建 `.venv` 虚拟环境并极速安装依赖项。
 2. 注册一个全局命令 `rosbag-auto-convert`，链接到用户的 `~/.local/bin`。
 3. 自动生成 `metadata.json` 和 `workflow.md`，并直接将其写入 Antigravity/Gemini AI 的记忆库（`~/.gemini/antigravity/knowledge`）。
-4. **自动向 `~/.cursorrules` (支持 Cursor), `~/CLAUDE.md` (支持 Claude Code), 以及 `~/.codex/skills` (支持 OpenAI Codex CLI) 注入全局技能指令。**
+4. **自动向 `~/.cursorrules` (支持 Cursor), `~/CLAUDE.md` (支持 Claude Code), `~/.codex/skills` (支持 OpenAI Codex CLI), 以及 `~/.cc-switch/skills` (支持 CC-Switch) 注入全局技能指令。**
 
 从那一刻起，无论是在这台电脑上的您，还是您的 AI，都可以随时在**任何地方**使用以下命令进行一键双向转换：
 ```bash
