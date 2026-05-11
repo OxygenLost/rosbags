@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Python3 COMPONENTS Interpreter Development.Embed)
+find_dependency(pybind11 CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/rosbags_cppTargets.cmake")
