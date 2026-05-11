@@ -67,6 +67,7 @@ Changelog = "https://gitlab.com/ternaris/rosbags/-/blob/master/CHANGES.rst"
 dev = [
   "declinate",
   "mypy",
+  "pybind11",
   "pytest",
   "pytest-cov",
   "reuse",

@@ -8,6 +8,7 @@
 #include <exception>
 #include <set>
 #include <sstream>
+#include <utility>
 
 #include <pybind11/embed.h>
 #include <pybind11/stl.h>
@@ -59,6 +60,10 @@ auto msgdef_format_from_python(py::handle value) -> MessageDefinitionFormat {
 
 auto require_connection_state(const std::shared_ptr<detail::ConnectionState>& state)
     -> const detail::ConnectionState&;
+auto require_typed_message_state(const std::shared_ptr<detail::TypedMessageState>& state)
+    -> const detail::TypedMessageState&;
+auto require_typestore_state(const std::shared_ptr<detail::TypestoreState>& state)
+    -> const detail::TypestoreState&;
 
 }  // namespace
 
@@ -168,6 +173,59 @@ struct MessageStreamState {
   py::object iterator;
 };
 
+struct TypestoreState {
+  TypestoreState(std::shared_ptr<RuntimeState> runtime_, py::object object_)
+      : runtime(std::move(runtime_)), object(std::move(object_)) {}
+
+  ~TypestoreState() {
+    if (Py_IsInitialized()) {
+      py::gil_scoped_acquire gil;
+      object = py::object();
+    }
+  }
+
+  std::shared_ptr<RuntimeState> runtime;
+  py::object object;
+};
+
+struct TypedMessageState {
+  TypedMessageState(
+      std::shared_ptr<RuntimeState> runtime_,
+      py::object typestore_,
+      py::object object_,
+      std::string msgtype_)
+      : runtime(std::move(runtime_)),
+        typestore(std::move(typestore_)),
+        object(std::move(object_)),
+        msgtype(std::move(msgtype_)) {}
+
+  ~TypedMessageState() {
+    if (Py_IsInitialized()) {
+      py::gil_scoped_acquire gil;
+      object = py::object();
+      typestore = py::object();
+    }
+  }
+
+  std::shared_ptr<RuntimeState> runtime;
+  py::object typestore;
+  py::object object;
+  std::string msgtype;
+};
+
+struct TypedValueState {
+  explicit TypedValueState(TypedValueKind kind_) : kind(kind_) {}
+
+  TypedValueKind kind = TypedValueKind::None;
+  bool bool_value = false;
+  std::int64_t int_value = 0;
+  std::uint64_t uint_value = 0;
+  double double_value = 0.0;
+  std::string string_value;
+  TypedMessage message_value;
+  std::vector<TypedValue> array_value;
+};
+
 struct WriterState {
   WriterState(std::shared_ptr<RuntimeState> runtime_, std::string path_, WriterOptions options_)
       : runtime(std::move(runtime_)), path(std::move(path_)), options(options_) {}
@@ -197,6 +255,24 @@ auto make_connection(std::shared_ptr<ConnectionState> state) -> Connection {
   return Connection(std::move(state));
 }
 
+auto typed_message_state(const TypedMessage& message)
+    -> const std::shared_ptr<TypedMessageState>& {
+  return message.state_;
+}
+
+auto make_typed_message(std::shared_ptr<TypedMessageState> state) -> TypedMessage {
+  return TypedMessage(std::move(state));
+}
+
+auto typestore_state(const Typestore& typestore)
+    -> const std::shared_ptr<TypestoreState>& {
+  return typestore.state_;
+}
+
+auto make_typestore(std::shared_ptr<TypestoreState> state) -> Typestore {
+  return Typestore(std::move(state));
+}
+
 }  // namespace detail
 
 namespace {
@@ -207,6 +283,321 @@ auto require_connection_state(const std::shared_ptr<detail::ConnectionState>& st
     throw Error("Invalid rosbags connection");
   }
   return *state;
+}
+
+auto require_typed_message_state(const std::shared_ptr<detail::TypedMessageState>& state)
+    -> const detail::TypedMessageState& {
+  if (!state) {
+    throw Error("Invalid rosbags typed message");
+  }
+  return *state;
+}
+
+auto require_typestore_state(const std::shared_ptr<detail::TypestoreState>& state)
+    -> const detail::TypestoreState& {
+  if (!state) {
+    throw Error("Invalid rosbags typestore");
+  }
+  return *state;
+}
+
+auto preset_name(TypestorePreset preset) -> const char* {
+  switch (preset) {
+    case TypestorePreset::Empty:
+      return "EMPTY";
+    case TypestorePreset::Latest:
+      return "LATEST";
+    case TypestorePreset::Ros1Noetic:
+      return "ROS1_NOETIC";
+    case TypestorePreset::Ros2Dashing:
+      return "ROS2_DASHING";
+    case TypestorePreset::Ros2Eloquent:
+      return "ROS2_ELOQUENT";
+    case TypestorePreset::Ros2Foxy:
+      return "ROS2_FOXY";
+    case TypestorePreset::Ros2Galactic:
+      return "ROS2_GALACTIC";
+    case TypestorePreset::Ros2Humble:
+      return "ROS2_HUMBLE";
+    case TypestorePreset::Ros2Iron:
+      return "ROS2_IRON";
+    case TypestorePreset::Ros2Jazzy:
+      return "ROS2_JAZZY";
+    case TypestorePreset::Ros2Kilted:
+      return "ROS2_KILTED";
+  }
+  throw Error("Unknown rosbags typestore preset");
+}
+
+auto as_tuple(py::handle value) -> py::tuple {
+  return py::reinterpret_borrow<py::tuple>(value);
+}
+
+auto tuple_item(py::handle value, std::size_t index) -> py::object {
+  return py::reinterpret_borrow<py::object>(as_tuple(value)[index]);
+}
+
+auto desc_node(py::handle desc) -> int {
+  return tuple_item(desc, 0).cast<int>();
+}
+
+auto desc_payload(py::handle desc) -> py::object {
+  return tuple_item(desc, 1);
+}
+
+auto base_name(py::handle desc) -> std::string {
+  return tuple_item(desc_payload(desc), 0).cast<std::string>();
+}
+
+auto array_subdesc(py::handle desc) -> py::object {
+  return tuple_item(desc_payload(desc), 0);
+}
+
+auto array_bound(py::handle desc) -> int {
+  return tuple_item(desc_payload(desc), 1).cast<int>();
+}
+
+auto is_bool_base(const std::string& base) -> bool {
+  return base == "bool";
+}
+
+auto is_string_base(const std::string& base) -> bool {
+  return base == "string";
+}
+
+auto is_float_base(const std::string& base) -> bool {
+  return base == "float32" || base == "float64" || base == "float128";
+}
+
+auto is_unsigned_base(const std::string& base) -> bool {
+  return base == "byte" || base == "char" || base == "uint8" || base == "uint16" ||
+         base == "uint32" || base == "uint64";
+}
+
+auto numpy_dtype(const std::string& base) -> py::object {
+  py::object numpy = py::module_::import("numpy");
+  if (base == "bool") {
+    return numpy.attr("bool_");
+  }
+  if (base == "byte" || base == "char") {
+    return numpy.attr("uint8");
+  }
+  if (base == "float128") {
+    return numpy.attr("longdouble");
+  }
+  return numpy.attr(base.c_str());
+}
+
+auto field_list(py::handle typestore, const std::string& msgtype) -> py::list {
+  py::object fielddefs = typestore.attr("fielddefs");
+  py::object type_entry = fielddefs[py::str(msgtype)];
+  return tuple_item(type_entry, 1).cast<py::list>();
+}
+
+auto find_field_desc(py::handle typestore, const std::string& msgtype, const std::string& field)
+    -> py::object {
+  for (py::handle item : field_list(typestore, msgtype)) {
+    py::tuple field_entry = py::reinterpret_borrow<py::tuple>(item);
+    if (field_entry[0].cast<std::string>() == field) {
+      return py::reinterpret_borrow<py::object>(field_entry[1]);
+    }
+  }
+
+  std::ostringstream stream;
+  stream << "Unknown field '" << field << "' for message type '" << msgtype << "'";
+  throw Error(stream.str());
+}
+
+auto message_from_python(
+    const std::shared_ptr<detail::RuntimeState>& runtime,
+    py::handle typestore,
+    py::handle object,
+    std::string msgtype = {}) -> TypedMessage {
+  if (msgtype.empty()) {
+    msgtype = object.attr("__msgtype__").cast<std::string>();
+  }
+
+  auto state = std::make_shared<detail::TypedMessageState>(
+      runtime,
+      py::reinterpret_borrow<py::object>(typestore),
+      py::reinterpret_borrow<py::object>(object),
+      std::move(msgtype));
+  return detail::make_typed_message(std::move(state));
+}
+
+auto value_from_python(
+    const std::shared_ptr<detail::RuntimeState>& runtime,
+    py::handle typestore,
+    py::handle desc,
+    py::handle value) -> TypedValue {
+  if (value.is_none()) {
+    return TypedValue();
+  }
+
+  switch (desc_node(desc)) {
+    case 1: {
+      const auto base = base_name(desc);
+      if (is_bool_base(base)) {
+        return TypedValue::from_bool(value.cast<bool>());
+      }
+      if (is_string_base(base)) {
+        return TypedValue::from_string(value.cast<std::string>());
+      }
+      if (is_float_base(base)) {
+        return TypedValue::from_double(value.cast<double>());
+      }
+      if (is_unsigned_base(base)) {
+        return TypedValue::from_uint(value.cast<std::uint64_t>());
+      }
+      return TypedValue::from_int(value.cast<std::int64_t>());
+    }
+    case 2:
+      return TypedValue::from_message(
+          message_from_python(runtime, typestore, value, desc_payload(desc).cast<std::string>()));
+    case 3:
+    case 4: {
+      py::object builtins = py::module_::import("builtins");
+      py::object list_obj = builtins.attr("list")(value);
+      const py::list values = list_obj.cast<py::list>();
+      std::vector<TypedValue> result;
+      result.reserve(values.size());
+      py::object subdesc = array_subdesc(desc);
+      for (py::handle item : values) {
+        result.push_back(value_from_python(runtime, typestore, subdesc, item));
+      }
+      return TypedValue::from_array(std::move(result));
+    }
+    default:
+      throw Error("Unknown rosbags field descriptor node");
+  }
+}
+
+auto expect_kind(const TypedValue& value, TypedValueKind kind, const std::string& context)
+    -> void {
+  if (value.kind() != kind) {
+    std::ostringstream stream;
+    stream << "Unexpected typed value kind for " << context;
+    throw Error(stream.str());
+  }
+}
+
+auto value_to_python(py::handle typestore, py::handle desc, const TypedValue& value) -> py::object;
+
+auto default_value_for_desc(
+    const std::shared_ptr<detail::RuntimeState>& runtime,
+    py::handle typestore,
+    py::handle desc) -> TypedValue {
+  switch (desc_node(desc)) {
+    case 1: {
+      const auto base = base_name(desc);
+      if (is_bool_base(base)) {
+        return TypedValue::from_bool(false);
+      }
+      if (is_string_base(base)) {
+        return TypedValue::from_string("");
+      }
+      if (is_float_base(base)) {
+        return TypedValue::from_double(0.0);
+      }
+      if (is_unsigned_base(base)) {
+        return TypedValue::from_uint(0);
+      }
+      return TypedValue::from_int(0);
+    }
+    case 2: {
+      const auto nested_type = desc_payload(desc).cast<std::string>();
+      py::list nested_fields = field_list(typestore, nested_type);
+      py::tuple args(nested_fields.size());
+      std::size_t index = 0;
+      for (py::handle item : nested_fields) {
+        py::tuple field_entry = py::reinterpret_borrow<py::tuple>(item);
+        py::object nested_desc = py::reinterpret_borrow<py::object>(field_entry[1]);
+        TypedValue nested_default = default_value_for_desc(runtime, typestore, nested_desc);
+        args[index++] = value_to_python(typestore, nested_desc, nested_default);
+      }
+      py::object cls = typestore.attr("types")[py::str(nested_type)];
+      return TypedValue::from_message(message_from_python(runtime, typestore, cls(*args), nested_type));
+    }
+    case 3: {
+      std::vector<TypedValue> values;
+      const auto count = array_bound(desc);
+      values.reserve(static_cast<std::size_t>(count));
+      py::object subdesc = array_subdesc(desc);
+      for (int idx = 0; idx < count; ++idx) {
+        values.push_back(default_value_for_desc(runtime, typestore, subdesc));
+      }
+      return TypedValue::from_array(std::move(values));
+    }
+    case 4:
+      return TypedValue::from_array({});
+    default:
+      throw Error("Unknown rosbags field descriptor node");
+  }
+}
+
+auto value_to_python(py::handle typestore, py::handle desc, const TypedValue& value) -> py::object {
+  switch (desc_node(desc)) {
+    case 1: {
+      const auto base = base_name(desc);
+      if (is_bool_base(base)) {
+        expect_kind(value, TypedValueKind::Bool, base);
+        return py::bool_(value.as_bool());
+      }
+      if (is_string_base(base)) {
+        expect_kind(value, TypedValueKind::String, base);
+        return py::str(value.as_string());
+      }
+      if (is_float_base(base)) {
+        expect_kind(value, TypedValueKind::Float, base);
+        return py::float_(value.as_double());
+      }
+      if (is_unsigned_base(base)) {
+        expect_kind(value, TypedValueKind::UInt, base);
+        return py::int_(value.as_uint());
+      }
+      expect_kind(value, TypedValueKind::Int, base);
+      return py::int_(value.as_int());
+    }
+    case 2: {
+      const auto expected = desc_payload(desc).cast<std::string>();
+      expect_kind(value, TypedValueKind::Message, expected);
+      TypedMessage message = value.as_message();
+      const auto& message_state = require_typed_message_state(
+          detail::typed_message_state(message));
+      if (message_state.msgtype != expected) {
+        std::ostringstream stream;
+        stream << "Expected typed message '" << expected << "', got '" << message_state.msgtype
+               << "'";
+        throw Error(stream.str());
+      }
+      return message_state.object;
+    }
+    case 3:
+    case 4: {
+      expect_kind(value, TypedValueKind::Array, "array or sequence");
+      const auto& values = value.as_array();
+      if (desc_node(desc) == 3 && values.size() != static_cast<std::size_t>(array_bound(desc))) {
+        throw Error("Unexpected array length");
+      }
+
+      py::object subdesc = array_subdesc(desc);
+      py::list result;
+      for (const auto& item : values) {
+        result.append(value_to_python(typestore, subdesc, item));
+      }
+
+      if (desc_node(subdesc) == 1) {
+        const auto base = base_name(subdesc);
+        if (!is_string_base(base)) {
+          py::object numpy = py::module_::import("numpy");
+          return numpy.attr("array")(result, py::arg("dtype") = numpy_dtype(base));
+        }
+      }
+      return std::move(result);
+    }
+    default:
+      throw Error("Unknown rosbags field descriptor node");
+  }
 }
 
 auto connection_from_python(
@@ -351,6 +742,368 @@ auto Connection::bag_format() const -> BagFormat {
   return require_connection_state(state_).bag_format;
 }
 
+TypedValue::TypedValue() = default;
+TypedValue::~TypedValue() = default;
+TypedValue::TypedValue(const TypedValue&) = default;
+auto TypedValue::operator=(const TypedValue&) -> TypedValue& = default;
+TypedValue::TypedValue(TypedValue&&) noexcept = default;
+auto TypedValue::operator=(TypedValue&&) noexcept -> TypedValue& = default;
+TypedValue::TypedValue(std::shared_ptr<detail::TypedValueState> state)
+    : state_(std::move(state)) {}
+
+auto TypedValue::from_bool(bool value) -> TypedValue {
+  auto state = std::make_shared<detail::TypedValueState>(TypedValueKind::Bool);
+  state->bool_value = value;
+  return TypedValue(std::move(state));
+}
+
+auto TypedValue::from_int(std::int64_t value) -> TypedValue {
+  auto state = std::make_shared<detail::TypedValueState>(TypedValueKind::Int);
+  state->int_value = value;
+  return TypedValue(std::move(state));
+}
+
+auto TypedValue::from_uint(std::uint64_t value) -> TypedValue {
+  auto state = std::make_shared<detail::TypedValueState>(TypedValueKind::UInt);
+  state->uint_value = value;
+  return TypedValue(std::move(state));
+}
+
+auto TypedValue::from_double(double value) -> TypedValue {
+  auto state = std::make_shared<detail::TypedValueState>(TypedValueKind::Float);
+  state->double_value = value;
+  return TypedValue(std::move(state));
+}
+
+auto TypedValue::from_string(std::string value) -> TypedValue {
+  auto state = std::make_shared<detail::TypedValueState>(TypedValueKind::String);
+  state->string_value = std::move(value);
+  return TypedValue(std::move(state));
+}
+
+auto TypedValue::from_message(TypedMessage value) -> TypedValue {
+  auto state = std::make_shared<detail::TypedValueState>(TypedValueKind::Message);
+  state->message_value = std::move(value);
+  return TypedValue(std::move(state));
+}
+
+auto TypedValue::from_array(std::vector<TypedValue> values) -> TypedValue {
+  auto state = std::make_shared<detail::TypedValueState>(TypedValueKind::Array);
+  state->array_value = std::move(values);
+  return TypedValue(std::move(state));
+}
+
+auto TypedValue::kind() const noexcept -> TypedValueKind {
+  return state_ ? state_->kind : TypedValueKind::None;
+}
+
+auto TypedValue::as_bool() const -> bool {
+  expect_kind(*this, TypedValueKind::Bool, "bool");
+  return state_->bool_value;
+}
+
+auto TypedValue::as_int() const -> std::int64_t {
+  expect_kind(*this, TypedValueKind::Int, "int");
+  return state_->int_value;
+}
+
+auto TypedValue::as_uint() const -> std::uint64_t {
+  expect_kind(*this, TypedValueKind::UInt, "uint");
+  return state_->uint_value;
+}
+
+auto TypedValue::as_double() const -> double {
+  expect_kind(*this, TypedValueKind::Float, "float");
+  return state_->double_value;
+}
+
+auto TypedValue::as_string() const -> std::string {
+  expect_kind(*this, TypedValueKind::String, "string");
+  return state_->string_value;
+}
+
+auto TypedValue::as_message() const -> TypedMessage {
+  expect_kind(*this, TypedValueKind::Message, "message");
+  return state_->message_value;
+}
+
+auto TypedValue::as_array() const -> std::vector<TypedValue> {
+  expect_kind(*this, TypedValueKind::Array, "array");
+  return state_->array_value;
+}
+
+TypedMessage::TypedMessage() = default;
+TypedMessage::~TypedMessage() = default;
+TypedMessage::TypedMessage(const TypedMessage&) = default;
+auto TypedMessage::operator=(const TypedMessage&) -> TypedMessage& = default;
+TypedMessage::TypedMessage(TypedMessage&&) noexcept = default;
+auto TypedMessage::operator=(TypedMessage&&) noexcept -> TypedMessage& = default;
+TypedMessage::TypedMessage(std::shared_ptr<detail::TypedMessageState> state)
+    : state_(std::move(state)) {}
+
+auto TypedMessage::valid() const noexcept -> bool {
+  return static_cast<bool>(state_);
+}
+
+auto TypedMessage::msgtype() const -> const std::string& {
+  return require_typed_message_state(state_).msgtype;
+}
+
+auto TypedMessage::field_names() const -> std::vector<std::string> {
+  const auto& state = require_typed_message_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    std::vector<std::string> result;
+    for (py::handle item : field_list(state.typestore, state.msgtype)) {
+      result.push_back(tuple_item(item, 0).cast<std::string>());
+    }
+    return result;
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto TypedMessage::fields() const -> std::vector<std::pair<std::string, TypedValue>> {
+  const auto& state = require_typed_message_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    std::vector<std::pair<std::string, TypedValue>> result;
+    for (py::handle item : field_list(state.typestore, state.msgtype)) {
+      const auto name = tuple_item(item, 0).cast<std::string>();
+      py::object desc = tuple_item(item, 1);
+      result.emplace_back(
+          name,
+          value_from_python(state.runtime, state.typestore, desc, state.object.attr(name.c_str())));
+    }
+    return result;
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto TypedMessage::get(const std::string& field_name) const -> TypedValue {
+  const auto& state = require_typed_message_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    py::object desc = find_field_desc(state.typestore, state.msgtype, field_name);
+    return value_from_python(
+        state.runtime, state.typestore, desc, state.object.attr(field_name.c_str()));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+void TypedMessage::set(const std::string& field_name, const TypedValue& value) {
+  const auto& state = require_typed_message_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    py::object desc = find_field_desc(state.typestore, state.msgtype, field_name);
+    py::setattr(state.object, field_name.c_str(), value_to_python(state.typestore, desc, value));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+Typestore::Typestore(Runtime& runtime, TypestorePreset preset) {
+  if (!runtime.state_) {
+    throw Error("Runtime is not initialized");
+  }
+
+  try {
+    py::gil_scoped_acquire gil;
+    py::object typesys = py::module_::import("rosbags.typesys");
+    py::object stores = typesys.attr("Stores");
+    py::object store = typesys.attr("get_typestore")(stores.attr(preset_name(preset)));
+    state_ = std::make_shared<detail::TypestoreState>(runtime.state_, std::move(store));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+Typestore::Typestore(std::shared_ptr<detail::TypestoreState> state)
+    : state_(std::move(state)) {}
+Typestore::~Typestore() = default;
+Typestore::Typestore(const Typestore&) = default;
+auto Typestore::operator=(const Typestore&) -> Typestore& = default;
+Typestore::Typestore(Typestore&&) noexcept = default;
+auto Typestore::operator=(Typestore&&) noexcept -> Typestore& = default;
+
+void Typestore::register_msg(const std::string& msgtype, const std::string& msgdef) {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    py::object typesys = py::module_::import("rosbags.typesys");
+    state.object.attr("register")(typesys.attr("get_types_from_msg")(msgdef, msgtype));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+void Typestore::register_idl(const std::string& idl_text) {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    py::object typesys = py::module_::import("rosbags.typesys");
+    state.object.attr("register")(typesys.attr("get_types_from_idl")(idl_text));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::create(
+    const std::string& msgtype,
+    std::vector<std::pair<std::string, TypedValue>> fields) const -> TypedMessage {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    for (const auto& field : fields) {
+      (void)find_field_desc(state.object, msgtype, field.first);
+    }
+
+    py::list definitions = field_list(state.object, msgtype);
+    py::tuple args(definitions.size());
+    std::size_t index = 0;
+    for (py::handle item : definitions) {
+      const auto name = tuple_item(item, 0).cast<std::string>();
+      py::object desc = tuple_item(item, 1);
+      const TypedValue* selected = nullptr;
+      for (const auto& field : fields) {
+        if (field.first == name) {
+          selected = &field.second;
+        }
+      }
+
+      TypedValue fallback;
+      if (!selected) {
+        fallback = default_value_for_desc(state.runtime, state.object, desc);
+        selected = &fallback;
+      }
+      args[index++] = value_to_python(state.object, desc, *selected);
+    }
+
+    py::object cls = state.object.attr("types")[py::str(msgtype)];
+    return message_from_python(state.runtime, state.object, cls(*args), msgtype);
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::deserialize_cdr(
+    const std::vector<std::uint8_t>& data,
+    const std::string& msgtype) const -> TypedMessage {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    py::object message = state.object.attr("deserialize_cdr")(to_bytes(data), msgtype);
+    return message_from_python(state.runtime, state.object, std::move(message), msgtype);
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::serialize_cdr(const TypedMessage& message, bool little_endian) const
+    -> std::vector<std::uint8_t> {
+  const auto& state = require_typestore_state(state_);
+  const auto& message_state = require_typed_message_state(detail::typed_message_state(message));
+  try {
+    py::gil_scoped_acquire gil;
+    return to_vector(state.object.attr("serialize_cdr")(
+        message_state.object,
+        message_state.msgtype,
+        py::arg("little_endian") = little_endian));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::deserialize_ros1(
+    const std::vector<std::uint8_t>& data,
+    const std::string& msgtype) const -> TypedMessage {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    py::object message = state.object.attr("deserialize_ros1")(to_bytes(data), msgtype);
+    return message_from_python(state.runtime, state.object, std::move(message), msgtype);
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::serialize_ros1(const TypedMessage& message) const -> std::vector<std::uint8_t> {
+  const auto& state = require_typestore_state(state_);
+  const auto& message_state = require_typed_message_state(detail::typed_message_state(message));
+  try {
+    py::gil_scoped_acquire gil;
+    return to_vector(state.object.attr("serialize_ros1")(message_state.object, message_state.msgtype));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::deserialize_raw(
+    const std::vector<std::uint8_t>& data,
+    const std::string& msgtype,
+    BagFormat format) const -> TypedMessage {
+  return format == BagFormat::Rosbag1 ? deserialize_ros1(data, msgtype)
+                                      : deserialize_cdr(data, msgtype);
+}
+
+auto Typestore::serialize_raw(const TypedMessage& message, BagFormat format) const
+    -> std::vector<std::uint8_t> {
+  return format == BagFormat::Rosbag1 ? serialize_ros1(message) : serialize_cdr(message);
+}
+
+auto Typestore::ros1_to_cdr(
+    const std::vector<std::uint8_t>& data,
+    const std::string& msgtype) const -> std::vector<std::uint8_t> {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    return to_vector(state.object.attr("ros1_to_cdr")(to_bytes(data), msgtype));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::cdr_to_ros1(
+    const std::vector<std::uint8_t>& data,
+    const std::string& msgtype) const -> std::vector<std::uint8_t> {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    return to_vector(state.object.attr("cdr_to_ros1")(to_bytes(data), msgtype));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Typestore::connection_spec(
+    std::string topic,
+    std::string msgtype,
+    BagFormat format,
+    std::string serialization_format) const -> ConnectionSpec {
+  const auto& state = require_typestore_state(state_);
+  try {
+    py::gil_scoped_acquire gil;
+    const auto ros_version = format == BagFormat::Rosbag1 ? 1 : 2;
+    const py::tuple generated = state.object.attr("generate_msgdef")(
+        msgtype, py::arg("ros_version") = ros_version);
+
+    ConnectionSpec spec;
+    spec.topic = std::move(topic);
+    spec.msgtype = std::move(msgtype);
+    spec.msgdef_format = MessageDefinitionFormat::Msg;
+    spec.msgdef_data = generated[0].cast<std::string>();
+    spec.digest = format == BagFormat::Rosbag1
+                      ? generated[1].cast<std::string>()
+                      : state.object.attr("hash_rihs01")(spec.msgtype).cast<std::string>();
+    spec.serialization_format = std::move(serialization_format);
+    return spec;
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
 MessageStream::MessageStream() = default;
 MessageStream::~MessageStream() = default;
 MessageStream::MessageStream(std::shared_ptr<detail::MessageStreamState> state)
@@ -478,6 +1231,31 @@ auto Reader::messages(ReaderMessageOptions options) -> MessageStream {
 
     return MessageStream(std::make_shared<detail::MessageStreamState>(
         state_->runtime, state_, std::move(generator)));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Reader::typestore() const -> Typestore {
+  require_reader_open(*state_);
+  try {
+    py::gil_scoped_acquire gil;
+    return detail::make_typestore(std::make_shared<detail::TypestoreState>(
+        state_->runtime, py::reinterpret_borrow<py::object>(state_->reader.attr("typestore"))));
+  } catch (const py::error_already_set& err) {
+    throw to_error(err);
+  }
+}
+
+auto Reader::deserialize(const Message& message) const -> TypedMessage {
+  require_reader_open(*state_);
+  const auto& connection = require_connection_state(detail::connection_state(message.connection));
+  try {
+    py::gil_scoped_acquire gil;
+    py::object py_message = state_->reader.attr("deserialize")(
+        to_bytes(message.data), connection.msgtype);
+    return message_from_python(
+        state_->runtime, state_->reader.attr("typestore"), std::move(py_message), connection.msgtype);
   } catch (const py::error_already_set& err) {
     throw to_error(err);
   }
@@ -661,6 +1439,16 @@ auto Writer::add_connection(const ConnectionSpec& spec) -> Connection {
   }
 }
 
+auto Writer::add_connection(
+    std::string topic,
+    std::string msgtype,
+    const Typestore& typestore,
+    std::string serialization_format) -> Connection {
+  require_writer_open(*state_);
+  return add_connection(typestore.connection_spec(
+      std::move(topic), std::move(msgtype), state_->options.format, std::move(serialization_format)));
+}
+
 void Writer::write(
     const Connection& connection,
     std::int64_t timestamp,
@@ -674,6 +1462,14 @@ void Writer::write(
   } catch (const py::error_already_set& err) {
     throw to_error(err);
   }
+}
+
+void Writer::write(
+    const Connection& connection,
+    std::int64_t timestamp,
+    const TypedMessage& message,
+    const Typestore& typestore) {
+  write(connection, timestamp, typestore.serialize_raw(message, state_->options.format));
 }
 
 }  // namespace rosbags
