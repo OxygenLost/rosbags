@@ -20,7 +20,6 @@ class TypedValue;
 class Typestore;
 
 namespace detail {
-struct RuntimeState;
 struct ConnectionState;
 struct MessageStreamState;
 struct ReaderState;
@@ -46,29 +45,6 @@ class Error : public std::runtime_error {
   explicit Error(const char* message);
 };
 
-struct RuntimeOptions {
-  std::vector<std::string> python_paths;
-};
-
-class Runtime {
- public:
-  explicit Runtime(RuntimeOptions options = {});
-  ~Runtime();
-
-  Runtime(const Runtime&) = delete;
-  auto operator=(const Runtime&) -> Runtime& = delete;
-
-  Runtime(Runtime&&) noexcept;
-  auto operator=(Runtime&&) noexcept -> Runtime&;
-
- private:
-  friend class Reader;
-  friend class Typestore;
-  friend class Writer;
-
-  std::shared_ptr<detail::RuntimeState> state_;
-};
-
 enum class BagFormat {
   Rosbag1,
   Rosbag2,
@@ -77,6 +53,20 @@ enum class BagFormat {
 enum class StoragePlugin {
   Sqlite3,
   Mcap,
+};
+
+enum class CompressionMode {
+  None,
+  File,
+  Message,
+  Storage,
+};
+
+enum class CompressionFormat {
+  None,
+  Bz2,
+  Lz4,
+  Zstd,
 };
 
 enum class MessageDefinitionFormat {
@@ -110,6 +100,10 @@ enum class TypedValueKind {
   Array,
 };
 
+struct ReaderOptions {
+  TypestorePreset default_typestore = TypestorePreset::Latest;
+};
+
 class Connection {
  public:
   Connection() = default;
@@ -121,6 +115,10 @@ class Connection {
   [[nodiscard]] auto msgdef_format() const -> MessageDefinitionFormat;
   [[nodiscard]] auto msgdef_data() const -> const std::string&;
   [[nodiscard]] auto digest() const -> const std::string&;
+  [[nodiscard]] auto serialization_format() const -> const std::string&;
+  [[nodiscard]] auto offered_qos_profiles() const -> const std::string&;
+  [[nodiscard]] auto callerid() const -> const std::optional<std::string>&;
+  [[nodiscard]] auto latching() const -> const std::optional<int>&;
   [[nodiscard]] auto msgcount() const -> std::int64_t;
   [[nodiscard]] auto bag_format() const -> BagFormat;
 
@@ -145,6 +143,7 @@ struct ConnectionSpec {
   std::string msgdef_data;
   std::string digest;
   std::string serialization_format = "cdr";
+  std::string offered_qos_profiles;
   std::optional<std::string> callerid;
   std::optional<int> latching;
 };
@@ -224,7 +223,7 @@ class TypedMessage {
 
 class Typestore {
  public:
-  explicit Typestore(Runtime& runtime, TypestorePreset preset = TypestorePreset::Latest);
+  explicit Typestore(TypestorePreset preset = TypestorePreset::Latest);
   ~Typestore();
 
   Typestore(const Typestore&);
@@ -311,8 +310,9 @@ class MessageStream {
 
 class Reader {
  public:
-  Reader(Runtime& runtime, std::vector<std::string> paths);
-  Reader(Runtime& runtime, std::initializer_list<std::string> paths);
+  explicit Reader(std::vector<std::string> paths, ReaderOptions options = {});
+  Reader(std::initializer_list<std::string> paths, ReaderOptions options = {});
+  explicit Reader(std::string path, ReaderOptions options = {});
   ~Reader();
 
   Reader(const Reader&) = delete;
@@ -343,11 +343,14 @@ struct WriterOptions {
   BagFormat format = BagFormat::Rosbag2;
   int rosbag2_version = 9;
   StoragePlugin storage = StoragePlugin::Sqlite3;
+  CompressionMode compression_mode = CompressionMode::None;
+  CompressionFormat compression_format = CompressionFormat::None;
+  std::size_t chunk_threshold = 1U << 20U;
 };
 
 class Writer {
  public:
-  Writer(Runtime& runtime, std::string path, WriterOptions options = {});
+  explicit Writer(std::string path, WriterOptions options = {});
   ~Writer();
 
   Writer(const Writer&) = delete;

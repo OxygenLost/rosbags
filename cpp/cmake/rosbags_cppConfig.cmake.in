@@ -2,7 +2,12 @@
 
 include(CMakeFindDependencyMacro)
 
-find_dependency(Python3 COMPONENTS Interpreter Development.Embed)
-find_dependency(pybind11 CONFIG)
+find_dependency(SQLite3)
+find_dependency(OpenSSL COMPONENTS Crypto)
+find_dependency(BZip2)
+find_dependency(PkgConfig)
+pkg_check_modules(YAML_CPP REQUIRED IMPORTED_TARGET yaml-cpp)
+pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
+pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 
 include("${CMAKE_CURRENT_LIST_DIR}/rosbags_cppTargets.cmake")

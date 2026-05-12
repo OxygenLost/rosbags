@@ -27,6 +27,17 @@ void require(bool condition, const std::string& message) {
   }
 }
 
+template <typename Func>
+void require_throws(Func&& func, const std::string& message) {
+  bool raised = false;
+  try {
+    func();
+  } catch (const rosbags::Error&) {
+    raised = true;
+  }
+  require(raised, message);
+}
+
 auto int8_spec(rosbags::BagFormat format) -> rosbags::ConnectionSpec {
   rosbags::ConnectionSpec spec;
   spec.topic = "/test";
@@ -64,8 +75,13 @@ auto make_int8_message(rosbags::Typestore& store, std::int64_t value) -> rosbags
   return store.create(kMsgtype, {{"data", rosbags::TypedValue::from_int(value)}});
 }
 
-void test_typestore_scalar(rosbags::Runtime& runtime) {
-  rosbags::Typestore store(runtime, rosbags::TypestorePreset::Latest);
+void test_typestore_scalar() {
+  rosbags::Typestore store(rosbags::TypestorePreset::Latest);
+
+  auto ros1_spec = store.connection_spec("/test", kMsgtype, rosbags::BagFormat::Rosbag1);
+  require(ros1_spec.digest == kMd5, "ros1 md5 digest mismatch");
+  auto ros2_spec = store.connection_spec("/test", kMsgtype, rosbags::BagFormat::Rosbag2);
+  require(ros2_spec.digest == kRihs, "ros2 RIHS01 digest mismatch");
 
   auto message = store.deserialize_cdr({0, 1, 0, 0, 1}, kMsgtype);
   require(message.valid(), "typed message should be valid");
@@ -73,15 +89,31 @@ void test_typestore_scalar(rosbags::Runtime& runtime) {
   require(message.get("data").as_int() == 1, "typed int8 value mismatch");
 
   message.set("data", rosbags::TypedValue::from_int(2));
-  require(store.serialize_cdr(message) == std::vector<std::uint8_t>({0, 1, 0, 0, 2}), "typed cdr serialize mismatch");
+  require(
+      store.serialize_cdr(message) == std::vector<std::uint8_t>({0, 1, 0, 0, 2}),
+      "typed cdr serialize mismatch");
   require(store.serialize_ros1(message) == std::vector<std::uint8_t>({2}), "typed ros1 serialize mismatch");
 
   require(store.cdr_to_ros1({0, 1, 0, 0, 3}, kMsgtype) == std::vector<std::uint8_t>({3}), "cdr_to_ros1 mismatch");
   require(store.ros1_to_cdr({4}, kMsgtype) == std::vector<std::uint8_t>({0, 1, 0, 0, 4}), "ros1_to_cdr mismatch");
+
+  auto time = store.create(
+      "builtin_interfaces/msg/Time",
+      {
+          {"sec", rosbags::TypedValue::from_int(1)},
+          {"nanosec", rosbags::TypedValue::from_uint(2)},
+      });
+  require(
+      store.serialize_cdr(time, false) ==
+          std::vector<std::uint8_t>({0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2}),
+      "big endian cdr serialize mismatch");
+  auto big = store.deserialize_cdr({0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4}, "builtin_interfaces/msg/Time");
+  require(big.get("sec").as_int() == 3, "big endian cdr sec mismatch");
+  require(big.get("nanosec").as_uint() == 4, "big endian cdr nanosec mismatch");
 }
 
-void test_nested_message(rosbags::Runtime& runtime) {
-  rosbags::Typestore store(runtime, rosbags::TypestorePreset::Latest);
+void test_nested_message() {
+  rosbags::Typestore store(rosbags::TypestorePreset::Latest);
 
   auto stamp = store.create(
       "builtin_interfaces/msg/Time",
@@ -129,8 +161,8 @@ void test_nested_message(rosbags::Runtime& runtime) {
   require(!copied.fields().empty(), "fields should not be empty");
 }
 
-void test_custom_msg_roundtrip(rosbags::Runtime& runtime) {
-  rosbags::Typestore store(runtime, rosbags::TypestorePreset::Empty);
+void test_custom_msg_roundtrip() {
+  rosbags::Typestore store(rosbags::TypestorePreset::Empty);
   const std::string msgtype = "test_msgs/msg/Dynamic";
   store.register_msg(msgtype, "int32 count\nstring label\nuint8[] values\n");
 
@@ -174,20 +206,31 @@ module test_msgs {
   require(idl_copy.get("label").as_string() == "nine", "custom idl string mismatch");
 }
 
+void test_generated_typestore() {
+  rosbags::Typestore store(rosbags::TypestorePreset::Latest);
+  auto image = store.create("sensor_msgs/msg/Image");
+  require(image.get("height").as_uint() == 0, "generated preset uint default mismatch");
+  require(image.get("encoding").as_string().empty(), "generated preset string default mismatch");
+  require(image.get("data").as_array().empty(), "generated preset sequence default mismatch");
+
+  rosbags::Typestore ros1_store(rosbags::TypestorePreset::Ros1Noetic);
+  auto laser = ros1_store.create("sensor_msgs/msg/LaserScan");
+  require(laser.get("ranges").as_array().empty(), "ros1 generated preset sequence mismatch");
+}
+
 void test_write_read(
-    rosbags::Runtime& runtime,
     const fs::path& path,
     rosbags::WriterOptions options,
     std::vector<std::uint8_t> first,
     std::vector<std::uint8_t> second) {
-  rosbags::Writer writer(runtime, path.string(), options);
+  rosbags::Writer writer(path.string(), options);
   writer.open();
   rosbags::Connection connection = writer.add_connection(int8_spec(options.format));
   writer.write(connection, 10, first);
   writer.write(connection, 30, second);
   writer.close();
 
-  rosbags::Reader reader(runtime, {path.string()});
+  rosbags::Reader reader({path.string()});
   reader.open();
   require(reader.bag_format() == options.format, "reader format mismatch");
   require(reader.message_count() == 2, "message count mismatch");
@@ -206,13 +249,13 @@ void test_write_read(
   reader.close();
 }
 
-void test_copy_roundtrip(rosbags::Runtime& runtime, const fs::path& src, const fs::path& dst) {
-  rosbags::Reader reader(runtime, {src.string()});
+void test_copy_roundtrip(const fs::path& src, const fs::path& dst) {
+  rosbags::Reader reader({src.string()});
   reader.open();
 
   rosbags::WriterOptions options;
   options.format = reader.bag_format();
-  rosbags::Writer writer(runtime, dst.string(), options);
+  rosbags::Writer writer(dst.string(), options);
   writer.open();
 
   std::map<int, rosbags::Connection> connection_map;
@@ -228,7 +271,7 @@ void test_copy_roundtrip(rosbags::Runtime& runtime, const fs::path& src, const f
   writer.close();
   reader.close();
 
-  rosbags::Reader copied(runtime, {dst.string()});
+  rosbags::Reader copied({dst.string()});
   copied.open();
   const auto messages = read_all(copied);
   require(messages.size() == 2, "copied message count mismatch");
@@ -238,10 +281,10 @@ void test_copy_roundtrip(rosbags::Runtime& runtime, const fs::path& src, const f
   copied.close();
 }
 
-void test_error_path(rosbags::Runtime& runtime, const fs::path& dst) {
+void test_error_path(const fs::path& dst) {
   rosbags::WriterOptions options;
   options.format = rosbags::BagFormat::Rosbag2;
-  rosbags::Writer writer(runtime, dst.string(), options);
+  rosbags::Writer writer(dst.string(), options);
   writer.open();
 
   rosbags::ConnectionSpec spec;
@@ -249,33 +292,25 @@ void test_error_path(rosbags::Runtime& runtime, const fs::path& dst) {
   spec.msgtype = kMsgtype;
   spec.msgdef_data = kMsgdef;
 
-  bool raised = false;
-  try {
-    (void)writer.add_connection(spec);
-  } catch (const rosbags::Error&) {
-    raised = true;
-  }
+  require_throws([&]() { (void)writer.add_connection(spec); }, "missing digest should raise rosbags::Error");
   writer.close();
-  require(raised, "missing digest should raise rosbags::Error");
 }
 
 void test_typed_write_read(
-    rosbags::Runtime& runtime,
     const fs::path& path,
     rosbags::WriterOptions options) {
   rosbags::Typestore store(
-      runtime,
       options.format == rosbags::BagFormat::Rosbag1 ? rosbags::TypestorePreset::Ros1Noetic
                                                     : rosbags::TypestorePreset::Latest);
 
-  rosbags::Writer writer(runtime, path.string(), options);
+  rosbags::Writer writer(path.string(), options);
   writer.open();
   auto connection = writer.add_connection("/typed", kMsgtype, store);
   writer.write(connection, 10, make_int8_message(store, 7), store);
   writer.write(connection, 20, make_int8_message(store, 8), store);
   writer.close();
 
-  rosbags::Reader reader(runtime, {path.string()});
+  rosbags::Reader reader({path.string()});
   reader.open();
   const auto messages = read_all(reader);
   require(messages.size() == 2, "typed bag message count mismatch");
@@ -288,85 +323,111 @@ void test_typed_write_read(
   reader.close();
 }
 
-void test_typed_error_paths(rosbags::Runtime& runtime) {
-  rosbags::Typestore store(runtime, rosbags::TypestorePreset::Latest);
+void test_typed_error_paths() {
+  rosbags::Typestore store(rosbags::TypestorePreset::Latest);
 
-  bool raised = false;
-  try {
-    (void)store.create("std_msgs/msg/Int8", {{"missing", rosbags::TypedValue::from_int(1)}});
-  } catch (const rosbags::Error&) {
-    raised = true;
-  }
-  require(raised, "unknown field should raise rosbags::Error");
+  require_throws(
+      [&]() { (void)store.create("std_msgs/msg/Int8", {{"missing", rosbags::TypedValue::from_int(1)}}); },
+      "unknown field should raise rosbags::Error");
 
-  raised = false;
-  try {
-    (void)store.create("missing_msgs/msg/Missing");
-  } catch (const rosbags::Error&) {
-    raised = true;
-  }
-  require(raised, "unknown type should raise rosbags::Error");
+  require_throws(
+      [&]() { (void)store.create("missing_msgs/msg/Missing"); },
+      "unknown type should raise rosbags::Error");
 
-  raised = false;
-  try {
-    (void)store.create(
-        "shape_msgs/msg/Plane",
-        {{"coef", rosbags::TypedValue::from_array({rosbags::TypedValue::from_double(1.0)})}});
-  } catch (const rosbags::Error&) {
-    raised = true;
-  }
-  require(raised, "fixed array length mismatch should raise rosbags::Error");
+  require_throws(
+      [&]() {
+        auto message = store.create(
+            "shape_msgs/msg/Plane",
+            {{"coef", rosbags::TypedValue::from_array({rosbags::TypedValue::from_double(1.0)})}});
+        (void)store.serialize_cdr(message);
+      },
+      "fixed array length mismatch should raise rosbags::Error");
 
-  raised = false;
-  try {
-    (void)store.create(
-        "builtin_interfaces/msg/Time",
-        {{"sec", rosbags::TypedValue::from_string("bad")}});
-  } catch (const rosbags::Error&) {
-    raised = true;
-  }
-  require(raised, "wrong typed value kind should raise rosbags::Error");
+  require_throws(
+      [&]() {
+        auto message = store.create(
+            "builtin_interfaces/msg/Time",
+            {{"sec", rosbags::TypedValue::from_string("bad")}});
+        (void)store.serialize_cdr(message);
+      },
+      "wrong typed value kind should raise rosbags::Error");
 }
 
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
   try {
-    require(argc == 3, "usage: cpp_api_test <python source path> <tmp dir>");
-    require(std::string(argv[1]).size() > 0, "python source path must not be empty");
+    require(argc == 2, "usage: cpp_api_test <tmp dir>");
 
-    fs::path tmp = argv[2];
+    fs::path tmp = argv[1];
     fs::remove_all(tmp);
     fs::create_directories(tmp);
 
-    rosbags::RuntimeOptions runtime_options;
-    runtime_options.python_paths.emplace_back(argv[1]);
-    rosbags::Runtime runtime(runtime_options);
-
-    test_typestore_scalar(runtime);
-    test_nested_message(runtime);
-    test_custom_msg_roundtrip(runtime);
+    test_typestore_scalar();
+    test_nested_message();
+    test_custom_msg_roundtrip();
+    test_generated_typestore();
 
     rosbags::WriterOptions rosbag1_options;
     rosbag1_options.format = rosbags::BagFormat::Rosbag1;
-    test_write_read(runtime, tmp / "raw1.bag", rosbag1_options, {1}, {2});
-    test_typed_write_read(runtime, tmp / "typed1.bag", rosbag1_options);
+    test_write_read(tmp / "raw1.bag", rosbag1_options, {1}, {2});
+    test_typed_write_read(tmp / "typed1.bag", rosbag1_options);
+
+    rosbags::WriterOptions rosbag1_bz2 = rosbag1_options;
+    rosbag1_bz2.compression_format = rosbags::CompressionFormat::Bz2;
+    test_write_read(tmp / "raw1_bz2.bag", rosbag1_bz2, {1}, {2});
+
+    rosbags::WriterOptions rosbag1_lz4 = rosbag1_options;
+    rosbag1_lz4.compression_format = rosbags::CompressionFormat::Lz4;
+    test_write_read(tmp / "raw1_lz4.bag", rosbag1_lz4, {1}, {2});
 
     rosbags::WriterOptions sqlite_options;
     sqlite_options.format = rosbags::BagFormat::Rosbag2;
     sqlite_options.storage = rosbags::StoragePlugin::Sqlite3;
-    test_write_read(runtime, tmp / "raw2_sqlite", sqlite_options, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
-    test_typed_write_read(runtime, tmp / "typed2_sqlite", sqlite_options);
+    test_write_read(tmp / "raw2_sqlite", sqlite_options, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
+    test_typed_write_read(tmp / "typed2_sqlite", sqlite_options);
+
+    rosbags::WriterOptions sqlite_zstd_message = sqlite_options;
+    sqlite_zstd_message.compression_mode = rosbags::CompressionMode::Message;
+    sqlite_zstd_message.compression_format = rosbags::CompressionFormat::Zstd;
+    test_write_read(tmp / "raw2_sqlite_message_zstd", sqlite_zstd_message, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
+
+    rosbags::WriterOptions sqlite_zstd_file = sqlite_options;
+    sqlite_zstd_file.compression_mode = rosbags::CompressionMode::File;
+    sqlite_zstd_file.compression_format = rosbags::CompressionFormat::Zstd;
+    test_write_read(tmp / "raw2_sqlite_file_zstd", sqlite_zstd_file, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
 
     rosbags::WriterOptions mcap_options;
     mcap_options.format = rosbags::BagFormat::Rosbag2;
     mcap_options.storage = rosbags::StoragePlugin::Mcap;
-    test_write_read(runtime, tmp / "raw2_mcap", mcap_options, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
-    test_typed_write_read(runtime, tmp / "typed2_mcap", mcap_options);
+    test_write_read(tmp / "raw2_mcap", mcap_options, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
+    test_typed_write_read(tmp / "typed2_mcap", mcap_options);
 
-    test_copy_roundtrip(runtime, tmp / "raw2_sqlite", tmp / "raw2_copy");
-    test_error_path(runtime, tmp / "bad_manual");
-    test_typed_error_paths(runtime);
+    rosbags::WriterOptions mcap_zstd_message = mcap_options;
+    mcap_zstd_message.compression_mode = rosbags::CompressionMode::Message;
+    mcap_zstd_message.compression_format = rosbags::CompressionFormat::Zstd;
+    test_write_read(tmp / "raw2_mcap_message_zstd", mcap_zstd_message, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
+
+    rosbags::WriterOptions mcap_zstd_file = mcap_options;
+    mcap_zstd_file.compression_mode = rosbags::CompressionMode::File;
+    mcap_zstd_file.compression_format = rosbags::CompressionFormat::Zstd;
+    test_write_read(tmp / "raw2_mcap_file_zstd", mcap_zstd_file, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
+
+    rosbags::WriterOptions mcap_zstd_storage = mcap_options;
+    mcap_zstd_storage.compression_mode = rosbags::CompressionMode::Storage;
+    mcap_zstd_storage.compression_format = rosbags::CompressionFormat::Zstd;
+    mcap_zstd_storage.chunk_threshold = 1;
+    test_write_read(tmp / "raw2_mcap_storage_zstd", mcap_zstd_storage, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
+
+    rosbags::WriterOptions mcap_lz4_storage = mcap_options;
+    mcap_lz4_storage.compression_mode = rosbags::CompressionMode::Storage;
+    mcap_lz4_storage.compression_format = rosbags::CompressionFormat::Lz4;
+    mcap_lz4_storage.chunk_threshold = 1;
+    test_write_read(tmp / "raw2_mcap_storage_lz4", mcap_lz4_storage, {0, 1, 0, 0, 1}, {0, 1, 0, 0, 2});
+
+    test_copy_roundtrip(tmp / "raw2_sqlite", tmp / "raw2_copy");
+    test_error_path(tmp / "bad_manual");
+    test_typed_error_paths();
   } catch (const std::exception& err) {
     std::cerr << err.what() << "\n";
     return 1;

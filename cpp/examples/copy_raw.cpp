@@ -1,7 +1,6 @@
 // Copyright 2020-2026 Ternaris
 // SPDX-License-Identifier: Apache-2.0
 
-#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <string>
@@ -10,25 +9,17 @@
 
 auto main(int argc, char** argv) -> int {
   if (argc < 3) {
-    std::cerr << "usage: copy_raw <src bag> <dst bag> [python source path]\n";
+    std::cerr << "usage: copy_raw <src bag> <dst bag>\n";
     return 2;
   }
 
-  rosbags::RuntimeOptions runtime_options;
-  if (argc >= 4) {
-    runtime_options.python_paths.push_back(argv[3]);
-  } else if (const char* path = std::getenv("ROSBAGS_PYTHONPATH")) {
-    runtime_options.python_paths.emplace_back(path);
-  }
-
   try {
-    rosbags::Runtime runtime(runtime_options);
-    rosbags::Reader reader(runtime, {argv[1]});
+    rosbags::Reader reader({argv[1]});
     reader.open();
 
     rosbags::WriterOptions writer_options;
     writer_options.format = reader.bag_format();
-    rosbags::Writer writer(runtime, argv[2], writer_options);
+    rosbags::Writer writer(argv[2], writer_options);
     writer.open();
 
     std::map<int, rosbags::Connection> connection_map;
