@@ -2223,6 +2223,23 @@ auto sqlite_text(sqlite3_stmt* stmt, int col) -> std::string {
   return text ? reinterpret_cast<const char*>(text) : "";
 }
 
+auto sqlite_column_exists(sqlite3* db, const std::string& table, const std::string& column) -> bool {
+  sqlite3_stmt* stmt = nullptr;
+  const std::string sql = "PRAGMA table_info(" + table + ")";
+  if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+    throw Error("Could not query sqlite3 schema for table '" + table + "'");
+  }
+  bool found = false;
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    if (sqlite_text(stmt, 1) == column) {
+      found = true;
+      break;
+    }
+  }
+  sqlite3_finalize(stmt);
+  return found;
+}
+
 void open_sqlite_storage(detail::ReaderState& state, const fs::path& database) {
   sqlite3* db = nullptr;
   if (sqlite3_open_v2(database.string().c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
@@ -2236,12 +2253,14 @@ void open_sqlite_storage(detail::ReaderState& state, const fs::path& database) {
   };
 
   sqlite3_stmt* stmt = nullptr;
-  const char* sql =
+  const bool has_type_description_hash = sqlite_column_exists(db, "topics", "type_description_hash");
+  const std::string topics_sql = std::string(
       "SELECT topics.id, name, type, COUNT(messages.id), serialization_format, "
-      "offered_qos_profiles, type_description_hash "
+      "offered_qos_profiles, ") +
+      (has_type_description_hash ? "type_description_hash " : "'' AS type_description_hash ") +
       "FROM topics LEFT JOIN messages ON topics.id = messages.topic_id "
       "GROUP BY topics.id ORDER BY topics.id";
-  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+  if (sqlite3_prepare_v2(db, topics_sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
     close_db();
     throw Error("Could not query sqlite3 topics");
   }
@@ -2262,7 +2281,7 @@ void open_sqlite_storage(detail::ReaderState& state, const fs::path& database) {
   }
   sqlite3_finalize(stmt);
 
-  sql =
+  const char* sql =
       "SELECT topic_type, encoding, encoded_message_definition, type_description_hash "
       "FROM message_definitions ORDER BY id";
   if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
