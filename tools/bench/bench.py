@@ -11,13 +11,17 @@ from timeit import timeit
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
-from rclpy.serialization import deserialize_message  # type: ignore[import-not-found]
-from rosbag2_py import (  # type: ignore[import-not-found]
+from rclpy.serialization import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
+    deserialize_message,
+)
+from rosbag2_py import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
     ConverterOptions,
     SequentialReader,
     StorageOptions,
 )
-from rosidl_runtime_py.utilities import get_message  # type: ignore[import-not-found]
+from rosidl_runtime_py.utilities import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
+    get_message,
+)
 
 from rosbags.rosbag2 import Reader
 from rosbags.typesys import Stores, get_typestore

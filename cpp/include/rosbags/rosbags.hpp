@@ -256,6 +256,17 @@ class Typestore {
       BagFormat format) const -> TypedMessage;
   [[nodiscard]] auto serialize_raw(const TypedMessage& message, BagFormat format) const
       -> std::vector<std::uint8_t>;
+  [[nodiscard]] auto migrate(
+      const TypedMessage& source,
+      const Typestore& source_typestore,
+      const std::string& dst_msgtype) const -> TypedMessage;
+  [[nodiscard]] auto convert_raw(
+      const std::vector<std::uint8_t>& data,
+      const std::string& src_msgtype,
+      const Typestore& source_typestore,
+      BagFormat src_format,
+      const std::string& dst_msgtype,
+      BagFormat dst_format) const -> std::vector<std::uint8_t>;
   [[nodiscard]] auto ros1_to_cdr(
       const std::vector<std::uint8_t>& data,
       const std::string& msgtype) const -> std::vector<std::uint8_t>;

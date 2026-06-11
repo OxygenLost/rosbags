@@ -29,9 +29,9 @@ Rosbags does not have any dependencies on the ROS software stacks and can be use
 
 Rosbags was developed for `MARV <https://gitlab.com/ternaris/marv-robotics>`_, which requires a fast, correct, and flexible library to read, manipulate, and write the various rosbag file formats.
 
-An experimental C++17 API is available under ``cpp/``. It embeds Python
-through ``pybind11`` and exposes rosbag reader/writer access for serialized
-message bytes plus dynamic typed message objects.
+An experimental native C++17 API is available under ``cpp/``. It does not
+embed Python and exposes rosbag reader/writer access for serialized message
+bytes plus dynamic typed message objects.
 
 
 Getting started

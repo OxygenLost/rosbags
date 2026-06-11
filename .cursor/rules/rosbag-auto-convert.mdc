@@ -3,5 +3,10 @@ description: Convert ROS bags bi-directionally between ROS 1 and ROS 2
 globs: ["*.bag", "*.db3", "metadata.yaml"]
 alwaysApply: false
 ---
+<!--
+Copyright 2020-2026 Ternaris
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # ROS Bag Bi-Directional Auto-Converter
 If the user asks to convert a ROS bag or convert between ROS1 and ROS2, simply run the global command `rosbag-auto-convert <bag_path>`. It automatically detects the bag version (ROS1 vs ROS2), converts it to the other version, and fixes any QoS metadata bugs.

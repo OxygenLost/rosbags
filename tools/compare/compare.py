@@ -8,19 +8,23 @@ import array
 import math
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from unittest.mock import Mock
 
 import genpy  # type: ignore[import-not-found]
 import numpy as np
-import rosgraph_msgs.msg  # type: ignore[import-not-found]
-from rclpy.serialization import deserialize_message  # type: ignore[import-not-found]
-from rosbag2_py import (  # type: ignore[import-not-found]
+import rosgraph_msgs.msg  # type: ignore[import-not-found, import-untyped, unused-ignore]
+from rclpy.serialization import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
+    deserialize_message,
+)
+from rosbag2_py import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
     ConverterOptions,
     SequentialReader,
     StorageOptions,
 )
-from rosidl_runtime_py.utilities import get_message  # type: ignore[import-not-found]
+from rosidl_runtime_py.utilities import (  # type: ignore[import-not-found, import-untyped, unused-ignore]
+    get_message,
+)
 
 rosgraph_msgs.msg.Log = Mock()
 rosgraph_msgs.msg.TopicStatistics = Mock()
@@ -29,15 +33,15 @@ import rosbag.bag  # type: ignore[import-not-found]  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-    from typing import Protocol, runtime_checkable
 
-    @runtime_checkable
-    class NativeMSG(Protocol):
-        """Minimal native ROS message interface used for benchmark."""
 
-        def get_fields_and_field_types(self) -> dict[str, str]:
-            """Introspect message type."""
-            raise NotImplementedError
+@runtime_checkable
+class NativeMSG(Protocol):
+    """Minimal native ROS message interface used for benchmark."""
+
+    def get_fields_and_field_types(self) -> dict[str, str]:
+        """Introspect message type."""
+        raise NotImplementedError
 
 
 class Reader:
@@ -46,7 +50,7 @@ class Reader:
     def __init__(self, path: str | Path) -> None:
         """Initialize reader shim."""
         self.reader = SequentialReader()
-        self.reader.open(StorageOptions(path, 'sqlite3'), ConverterOptions('', ''))
+        self.reader.open(StorageOptions(str(path), 'sqlite3'), ConverterOptions('', ''))
         self.typemap = {x.name: x.type for x in self.reader.get_all_topics_and_types()}
 
     def messages(self) -> Generator[tuple[str, int, bytes], None, None]:
@@ -92,12 +96,20 @@ def compare(ref: object, msg: object) -> None:
             msgval = getattr(msg, name)
             compare(refval, msgval)
 
-    elif isinstance(msg, array.array):
+    elif isinstance(msg, np.ndarray):
         if isinstance(ref, bytes):
             assert msg.tobytes() == ref
         else:
-            assert isinstance(msg, np.ndarray)
-            assert (msg == ref).all()
+            assert np.array_equal(msg, np.asarray(ref))
+
+    elif isinstance(msg, array.array):
+        if isinstance(ref, bytes):
+            assert msg.tobytes() == ref
+        elif isinstance(ref, np.ndarray):
+            assert np.array_equal(np.asarray(msg), ref)
+        else:
+            assert isinstance(ref, array.array | list)
+            assert list(msg) == list(ref)
 
     elif isinstance(msg, list):
         assert isinstance(ref, list | np.ndarray)

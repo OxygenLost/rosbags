@@ -1,3 +1,8 @@
+<!--
+Copyright 2020-2026 Ternaris
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # ROS Bag Auto-Converter & AI Skill / ROS Bag 自动转换器 & AI 技能包
 
 [English](#english) | [中文](#中文)
@@ -13,6 +18,19 @@ If you have cloned this repository (or want to), you don't need to manually conf
 
 ### About This Tool
 This repository contains an automated tool for bi-directional conversion between ROS 1 and ROS 2 bags. It natively supports **Livox custom messages** and automatically fixes known `yaml-cpp` QoS bugs during conversion.
+
+### Benchmark / Verification
+
+| Item | Result |
+| --- | --- |
+| Source bag size | 1.3G |
+| Converted bag size | 1.4G |
+| Messages | 74,412 total (`/livox/imu`: 70,868, `/livox/lidar`: 3,544) |
+| Python converter | 123.037s |
+| C++ converter | 24.446s |
+| C++ speedup | ~5.0x faster than Python |
+| Full output equivalence | C++ and Python conversion outputs are byte-identical: 74,412 messages / 1,440,331,640 CDR payload bytes |
+| Native compare check | First 1,000-message subset passed: `Bags are identical.` |
 
 ### What happens behind the scenes?
 When the AI runs `install.sh`, it will:
@@ -37,6 +55,19 @@ rosbag-auto-convert /path/to/any/bag/data
 
 ### 关于此工具
 本代码库包含一个用于 ROS 1 和 ROS 2 数据包双向自动转换的工具。它原生支持 **Livox 自定义消息**，并在转换过程中自动修复已知的 `yaml-cpp` QoS 报错问题。
+
+### 测试 / 性能结果
+
+| 项目 | 结果 |
+| --- | --- |
+| 源数据包大小 | 1.3G |
+| 转换后数据包大小 | 1.4G |
+| 消息数量 | 共 74,412 条（`/livox/imu`: 70,868，`/livox/lidar`: 3,544） |
+| Python 转换耗时 | 123.037s |
+| C++ 转换耗时 | 24.446s |
+| C++ 加速比 | 约为 Python 的 5.0 倍 |
+| 全量输出一致性 | C++ 与 Python 转换输出逐字节一致：74,412 条消息 / 1,440,331,640 CDR payload bytes |
+| 原生 compare 校验 | 前 1,000 条消息子集通过：`Bags are identical.` |
 
 ### 后台会自动发生什么？
 当 AI 运行 `install.sh` 时，它会：

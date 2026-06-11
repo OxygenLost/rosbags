@@ -850,6 +850,51 @@ auto parse_type_token(const std::string& owner, const std::string& token) -> Fie
   return desc;
 }
 
+auto field_desc_equal(const FieldDesc& lhs, const FieldDesc& rhs) -> bool {
+  if (lhs.kind != rhs.kind || lhs.value != rhs.value || lhs.bound != rhs.bound) {
+    return false;
+  }
+  if (static_cast<bool>(lhs.sub) != static_cast<bool>(rhs.sub)) {
+    return false;
+  }
+  return !lhs.sub || field_desc_equal(*lhs.sub, *rhs.sub);
+}
+
+auto type_def_equal(const TypeDef& lhs, const TypeDef& rhs) -> bool {
+  if (lhs.constants.size() != rhs.constants.size() || lhs.fields.size() != rhs.fields.size()) {
+    return false;
+  }
+  for (std::size_t idx = 0; idx < lhs.constants.size(); ++idx) {
+    const auto& left = lhs.constants[idx];
+    const auto& right = rhs.constants[idx];
+    if (left.type != right.type || left.name != right.name || left.value != right.value) {
+      return false;
+    }
+  }
+  for (std::size_t idx = 0; idx < lhs.fields.size(); ++idx) {
+    const auto& left = lhs.fields[idx];
+    const auto& right = rhs.fields[idx];
+    if (left.name != right.name || !field_desc_equal(left.desc, right.desc)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void merge_msg_types(
+    std::unordered_map<std::string, TypeDef>& types,
+    std::unordered_map<std::string, TypeDef> parsed) {
+  for (const auto& item : parsed) {
+    auto existing = types.find(item.first);
+    if (existing != types.end() && !type_def_equal(existing->second, item.second)) {
+      throw Error("Message type '" + item.first + "' has a different definition");
+    }
+  }
+  for (auto& item : parsed) {
+    types.insert_or_assign(item.first, std::move(item.second));
+  }
+}
+
 void parse_msg_body(
     std::unordered_map<std::string, TypeDef>& types,
     const std::string& msgtype,
@@ -891,13 +936,15 @@ void parse_msg_definition(
     std::unordered_map<std::string, TypeDef>& types,
     const std::string& root_type,
     const std::string& text) {
+  std::unordered_map<std::string, TypeDef> parsed;
   const std::string sep(80, '=');
   std::size_t pos = 0;
   std::string root_body;
   std::vector<std::pair<std::string, std::string>> sections;
   const auto first_sep = text.find(sep);
   if (first_sep == std::string::npos) {
-    parse_msg_body(types, root_type, text);
+    parse_msg_body(parsed, root_type, text);
+    merge_msg_types(types, std::move(parsed));
     return;
   }
 
@@ -928,8 +975,9 @@ void parse_msg_definition(
   }
 
   for (const auto& section : sections) {
-    parse_msg_body(types, section.first, section.second);
+    parse_msg_body(parsed, section.first, section.second);
   }
+  merge_msg_types(types, std::move(parsed));
 }
 
 auto idl_type_to_msg(const std::string& type) -> std::string {
@@ -1131,6 +1179,7 @@ struct WriterState {
   };
   std::vector<WrittenChunk> written_chunks;
   sqlite3* sqlite = nullptr;
+  sqlite3_stmt* sqlite_insert_message = nullptr;
   std::int64_t min_timestamp = kMaxTime;
   std::int64_t max_timestamp = 0;
   std::int64_t total_messages = 0;
@@ -1227,6 +1276,16 @@ auto field_value(const TypedMessage& message, const std::string& name) -> const 
   throw Error("Unknown field '" + name + "' for message type '" + state.msgtype + "'");
 }
 
+auto find_field_value(const TypedMessage& message, const std::string& name) -> const TypedValue* {
+  const auto& state = require_typed_message_state(detail::typed_message_state(message));
+  for (const auto& field : state.fields) {
+    if (field.first == name) {
+      return &field.second;
+    }
+  }
+  return nullptr;
+}
+
 auto scalar_default(const std::string& base) -> TypedValue {
   if (base == "bool") {
     return TypedValue::from_bool(false);
@@ -1270,6 +1329,117 @@ auto default_for_desc(const std::shared_ptr<detail::TypestoreState>& store, cons
       return TypedValue::from_array({});
   }
   return {};
+}
+
+auto migrate_value(
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const FieldDesc& dst_desc,
+    const FieldDesc& src_desc,
+    const TypedValue& src_value) -> TypedValue;
+
+auto migrate_message_state(
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::string& dst_msgtype,
+    const TypedMessage& src_message) -> TypedMessage {
+  const auto normalized_dst = normalize_msgtype(dst_msgtype);
+  const auto& src_state = require_typed_message_state(detail::typed_message_state(src_message));
+  const auto& src_type = require_type(src_store, src_state.msgtype);
+  const auto& dst_type = require_type(dst_store, normalized_dst);
+
+  auto message_state = std::make_shared<detail::TypedMessageState>();
+  message_state->typestore = dst_store;
+  message_state->msgtype = normalized_dst;
+
+  for (const auto& dst_field : dst_type.fields) {
+    const auto src_field = std::find_if(src_type.fields.begin(), src_type.fields.end(), [&](const FieldDef& item) {
+      return item.name == dst_field.name;
+    });
+    const auto* src_value = find_field_value(src_message, dst_field.name);
+    if (src_field == src_type.fields.end() || !src_value) {
+      message_state->fields.emplace_back(dst_field.name, default_for_desc(dst_store, dst_field.desc));
+      continue;
+    }
+    message_state->fields.emplace_back(
+        dst_field.name,
+        migrate_value(dst_store, src_store, dst_field.desc, src_field->desc, *src_value));
+  }
+
+  return detail::make_typed_message(std::move(message_state));
+}
+
+auto migrate_value(
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const FieldDesc& dst_desc,
+    const FieldDesc& src_desc,
+    const TypedValue& src_value) -> TypedValue {
+  if (dst_desc.kind == NodeKind::Base) {
+    if (src_desc.kind != NodeKind::Base ||
+        ((dst_desc.value == "string") != (src_desc.value == "string"))) {
+      return default_for_desc(dst_store, dst_desc);
+    }
+    if (dst_desc.value == "bool") {
+      return TypedValue::from_bool(src_value.as_bool());
+    }
+    if (dst_desc.value == "string") {
+      return TypedValue::from_string(src_value.as_string());
+    }
+    if (dst_desc.value == "float32" || dst_desc.value == "float64" || dst_desc.value == "float128") {
+      return TypedValue::from_double(src_value.as_double());
+    }
+    if (base_is_unsigned(dst_desc.value)) {
+      if (src_value.kind() == TypedValueKind::UInt) {
+        return TypedValue::from_uint(src_value.as_uint());
+      }
+      if (src_value.kind() == TypedValueKind::Int) {
+        return TypedValue::from_uint(static_cast<std::uint64_t>(src_value.as_int()));
+      }
+      return default_for_desc(dst_store, dst_desc);
+    }
+    if (src_value.kind() == TypedValueKind::Int) {
+      return TypedValue::from_int(src_value.as_int());
+    }
+    if (src_value.kind() == TypedValueKind::UInt) {
+      return TypedValue::from_int(static_cast<std::int64_t>(src_value.as_uint()));
+    }
+    return default_for_desc(dst_store, dst_desc);
+  }
+
+  if (dst_desc.kind == NodeKind::Name) {
+    if (src_desc.kind != NodeKind::Name || src_value.kind() != TypedValueKind::Message) {
+      return default_for_desc(dst_store, dst_desc);
+    }
+    return TypedValue::from_message(
+        migrate_message_state(dst_store, src_store, dst_desc.value, src_value.as_message()));
+  }
+
+  if (dst_desc.kind == NodeKind::Array || dst_desc.kind == NodeKind::Sequence) {
+    if ((src_desc.kind != NodeKind::Array && src_desc.kind != NodeKind::Sequence) ||
+        !src_desc.sub ||
+        !dst_desc.sub ||
+        src_value.kind() != TypedValueKind::Array) {
+      return default_for_desc(dst_store, dst_desc);
+    }
+    std::vector<TypedValue> result;
+    auto values = src_value.as_array();
+    std::size_t target_size = values.size();
+    if (dst_desc.kind == NodeKind::Array) {
+      target_size = static_cast<std::size_t>(dst_desc.bound);
+    }
+    result.reserve(target_size);
+    const auto copy_size = std::min(values.size(), target_size);
+    for (std::size_t idx = 0; idx < copy_size; ++idx) {
+      result.push_back(migrate_value(dst_store, src_store, *dst_desc.sub, *src_desc.sub, values[idx]));
+    }
+    while (result.size() < target_size) {
+      result.push_back(default_for_desc(dst_store, *dst_desc.sub));
+    }
+    return TypedValue::from_array(std::move(result));
+  }
+
+  return default_for_desc(dst_store, dst_desc);
 }
 
 auto make_connection(
@@ -1689,6 +1859,413 @@ auto read_cdr_value(
     }
   }
   return {};
+}
+
+auto cdr_align_before_desc(
+    const FieldDesc& desc,
+    const std::shared_ptr<detail::TypestoreState>& store) -> std::size_t;
+
+auto cdr_align_after_desc(
+    const FieldDesc& desc,
+    const std::shared_ptr<detail::TypestoreState>& store) -> std::size_t {
+  switch (desc.kind) {
+    case NodeKind::Base:
+      return desc.value == "string" ? 1 : base_size(desc.value);
+    case NodeKind::Name: {
+      const auto& type = require_type(store, desc.value);
+      if (type.fields.empty()) {
+        return 1;
+      }
+      return cdr_align_after_desc(type.fields.back().desc, store);
+    }
+    case NodeKind::Array:
+      return cdr_align_after_desc(*desc.sub, store);
+    case NodeKind::Sequence:
+      return std::min<std::size_t>(4, cdr_align_after_desc(*desc.sub, store));
+  }
+  return 1;
+}
+
+auto cdr_align_before_desc(
+    const FieldDesc& desc,
+    const std::shared_ptr<detail::TypestoreState>& store) -> std::size_t {
+  switch (desc.kind) {
+    case NodeKind::Base:
+      return desc.value == "string" ? 4 : base_size(desc.value);
+    case NodeKind::Name: {
+      const auto& type = require_type(store, desc.value);
+      if (type.fields.empty()) {
+        return 1;
+      }
+      return cdr_align_before_desc(type.fields.front().desc, store);
+    }
+    case NodeKind::Array:
+      return cdr_align_before_desc(*desc.sub, store);
+    case NodeKind::Sequence:
+      return 4;
+  }
+  return 1;
+}
+
+auto align_offset(std::size_t value, std::size_t alignment) -> std::size_t {
+  return alignment <= 1 ? value : ((value + alignment - 1) & ~(alignment - 1));
+}
+
+auto plain_static_size_desc(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const FieldDesc& src_desc,
+    const FieldDesc& dst_desc) -> std::optional<std::size_t>;
+
+auto plain_static_size_message(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const std::string& src_msgtype,
+    const std::string& dst_msgtype) -> std::optional<std::size_t> {
+  const auto& src_type = require_type(src_store, src_msgtype);
+  const auto& dst_type = require_type(dst_store, dst_msgtype);
+  if (src_type.fields.size() != dst_type.fields.size()) {
+    return std::nullopt;
+  }
+
+  std::size_t ros1_pos = 0;
+  std::size_t cdr_pos = 0;
+  for (std::size_t idx = 0; idx < dst_type.fields.size(); ++idx) {
+    const auto& src_field = src_type.fields[idx];
+    const auto& dst_field = dst_type.fields[idx];
+    if (src_field.name != dst_field.name || ros1_pos != cdr_pos) {
+      return std::nullopt;
+    }
+
+    auto size = plain_static_size_desc(src_store, dst_store, src_field.desc, dst_field.desc);
+    if (!size) {
+      return std::nullopt;
+    }
+    ros1_pos += *size;
+    cdr_pos += *size;
+
+    if (idx + 1 < dst_type.fields.size()) {
+      const auto after = cdr_align_after_desc(dst_field.desc, dst_store);
+      const auto before_next = cdr_align_before_desc(dst_type.fields[idx + 1].desc, dst_store);
+      if (after < before_next) {
+        cdr_pos = align_offset(cdr_pos, before_next);
+      }
+    }
+  }
+  return ros1_pos == cdr_pos ? std::optional<std::size_t>{ros1_pos} : std::nullopt;
+}
+
+auto plain_static_size_desc(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const FieldDesc& src_desc,
+    const FieldDesc& dst_desc) -> std::optional<std::size_t> {
+  if (dst_desc.kind == NodeKind::Base) {
+    if (src_desc.kind != NodeKind::Base ||
+        src_desc.value == "string" ||
+        dst_desc.value == "string" ||
+        base_size(src_desc.value) != base_size(dst_desc.value)) {
+      return std::nullopt;
+    }
+    return base_size(dst_desc.value);
+  }
+  if (dst_desc.kind == NodeKind::Array) {
+    if (src_desc.kind != NodeKind::Array || src_desc.bound != dst_desc.bound) {
+      return std::nullopt;
+    }
+    auto sub_size = plain_static_size_desc(src_store, dst_store, *src_desc.sub, *dst_desc.sub);
+    return sub_size ? std::optional<std::size_t>{*sub_size * static_cast<std::size_t>(dst_desc.bound)}
+                    : std::nullopt;
+  }
+  if (dst_desc.kind == NodeKind::Name) {
+    if (src_desc.kind != NodeKind::Name) {
+      return std::nullopt;
+    }
+    return plain_static_size_message(src_store, dst_store, src_desc.value, dst_desc.value);
+  }
+  return std::nullopt;
+}
+
+auto can_fast_convert_desc_ros1_to_cdr(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const FieldDesc& src_desc,
+    const FieldDesc& dst_desc,
+    std::set<std::pair<std::string, std::string>>& active) -> bool;
+
+auto can_fast_convert_message_ros1_to_cdr(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const std::string& src_msgtype,
+    const std::string& dst_msgtype,
+    std::set<std::pair<std::string, std::string>>& active) -> bool {
+  const auto src_normalized = normalize_msgtype(src_msgtype);
+  const auto dst_normalized = normalize_msgtype(dst_msgtype);
+  const auto key = std::make_pair(src_normalized, dst_normalized);
+  if (active.count(key) != 0) {
+    return true;
+  }
+
+  active.insert(key);
+  const auto& src_type = require_type(src_store, src_normalized);
+  const auto& dst_type = require_type(dst_store, dst_normalized);
+  std::size_t dst_idx = 0;
+  for (const auto& src_field : src_type.fields) {
+    if (dst_idx < dst_type.fields.size() && src_field.name == dst_type.fields[dst_idx].name) {
+      if (!can_fast_convert_desc_ros1_to_cdr(
+              src_store,
+              dst_store,
+              src_field.desc,
+              dst_type.fields[dst_idx].desc,
+              active)) {
+        active.erase(key);
+        return false;
+      }
+      ++dst_idx;
+    }
+  }
+  active.erase(key);
+  return dst_idx == dst_type.fields.size();
+}
+
+auto can_fast_convert_desc_ros1_to_cdr(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const FieldDesc& src_desc,
+    const FieldDesc& dst_desc,
+    std::set<std::pair<std::string, std::string>>& active) -> bool {
+  if (dst_desc.kind == NodeKind::Base) {
+    if (src_desc.kind != NodeKind::Base) {
+      return false;
+    }
+    if (dst_desc.value == "string" || src_desc.value == "string") {
+      return dst_desc.value == "string" && src_desc.value == "string";
+    }
+    return base_size(dst_desc.value) == base_size(src_desc.value);
+  }
+
+  if (dst_desc.kind == NodeKind::Name) {
+    return src_desc.kind == NodeKind::Name &&
+           can_fast_convert_message_ros1_to_cdr(src_store, dst_store, src_desc.value, dst_desc.value, active);
+  }
+
+  if (dst_desc.kind == NodeKind::Array) {
+    return src_desc.kind == NodeKind::Array &&
+           src_desc.bound == dst_desc.bound &&
+           src_desc.sub &&
+           dst_desc.sub &&
+           can_fast_convert_desc_ros1_to_cdr(src_store, dst_store, *src_desc.sub, *dst_desc.sub, active);
+  }
+
+  if (dst_desc.kind == NodeKind::Sequence) {
+    return src_desc.kind == NodeKind::Sequence &&
+           src_desc.sub &&
+           dst_desc.sub &&
+           can_fast_convert_desc_ros1_to_cdr(src_store, dst_store, *src_desc.sub, *dst_desc.sub, active);
+  }
+
+  return false;
+}
+
+void skip_ros1_value(
+    const std::vector<std::uint8_t>& data,
+    std::size_t& pos,
+    const std::shared_ptr<detail::TypestoreState>& store,
+    const FieldDesc& desc) {
+  switch (desc.kind) {
+    case NodeKind::Base:
+      if (desc.value == "string") {
+        const auto size = read_le<std::uint32_t>(data, pos);
+        if (pos + size > data.size()) {
+          throw Error("Unexpected end of ROS1 string");
+        }
+        pos += size;
+      } else {
+        if (pos + base_size(desc.value) > data.size()) {
+          throw Error("Unexpected end of ROS1 value");
+        }
+        pos += base_size(desc.value);
+      }
+      return;
+    case NodeKind::Name: {
+      const auto& type = require_type(store, desc.value);
+      for (const auto& field : type.fields) {
+        skip_ros1_value(data, pos, store, field.desc);
+      }
+      return;
+    }
+    case NodeKind::Array:
+      for (int idx = 0; idx < desc.bound; ++idx) {
+        skip_ros1_value(data, pos, store, *desc.sub);
+      }
+      return;
+    case NodeKind::Sequence: {
+      const auto size = read_le<std::uint32_t>(data, pos);
+      for (std::uint32_t idx = 0; idx < size; ++idx) {
+        skip_ros1_value(data, pos, store, *desc.sub);
+      }
+      return;
+    }
+  }
+}
+
+void convert_ros1_value_to_cdr(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const FieldDesc& src_desc,
+    const FieldDesc& dst_desc,
+    const std::vector<std::uint8_t>& data,
+    std::size_t& pos,
+    std::vector<std::uint8_t>& out);
+
+void convert_ros1_message_to_cdr(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const std::string& src_msgtype,
+    const std::string& dst_msgtype,
+    const std::vector<std::uint8_t>& data,
+    std::size_t& pos,
+    std::vector<std::uint8_t>& out) {
+  const auto& src_type = require_type(src_store, src_msgtype);
+  const auto& dst_type = require_type(dst_store, dst_msgtype);
+  std::size_t dst_idx = 0;
+  for (const auto& src_field : src_type.fields) {
+    if (dst_idx < dst_type.fields.size() && src_field.name == dst_type.fields[dst_idx].name) {
+      convert_ros1_value_to_cdr(
+          src_store,
+          dst_store,
+          src_field.desc,
+          dst_type.fields[dst_idx].desc,
+          data,
+          pos,
+          out);
+      ++dst_idx;
+    } else {
+      skip_ros1_value(data, pos, src_store, src_field.desc);
+    }
+  }
+  if (dst_idx != dst_type.fields.size()) {
+    throw Error("Cannot fast-convert ROS1 message to CDR");
+  }
+}
+
+void convert_ros1_base_to_cdr(
+    const FieldDesc& src_desc,
+    const FieldDesc& dst_desc,
+    const std::vector<std::uint8_t>& data,
+    std::size_t& pos,
+    std::vector<std::uint8_t>& out) {
+  if (dst_desc.value == "string") {
+    const auto size = read_le<std::uint32_t>(data, pos);
+    if (pos + size > data.size()) {
+      throw Error("Unexpected end of ROS1 string");
+    }
+    align_vector(out, 4);
+    append_le<std::uint32_t>(out, size + 1);
+    out.insert(out.end(), data.begin() + static_cast<std::ptrdiff_t>(pos),
+               data.begin() + static_cast<std::ptrdiff_t>(pos + size));
+    out.push_back(0);
+    pos += size;
+    return;
+  }
+
+  const auto size = base_size(dst_desc.value);
+  if (base_size(src_desc.value) != size || pos + size > data.size()) {
+    throw Error("Unexpected end of ROS1 value");
+  }
+  align_vector(out, size);
+  out.insert(out.end(), data.begin() + static_cast<std::ptrdiff_t>(pos),
+             data.begin() + static_cast<std::ptrdiff_t>(pos + size));
+  pos += size;
+}
+
+void convert_ros1_value_to_cdr(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const FieldDesc& src_desc,
+    const FieldDesc& dst_desc,
+    const std::vector<std::uint8_t>& data,
+    std::size_t& pos,
+    std::vector<std::uint8_t>& out) {
+  switch (dst_desc.kind) {
+    case NodeKind::Base:
+      convert_ros1_base_to_cdr(src_desc, dst_desc, data, pos, out);
+      return;
+    case NodeKind::Name:
+      align_vector(out, cdr_alignment_for_write(dst_desc, dst_store));
+      convert_ros1_message_to_cdr(src_store, dst_store, src_desc.value, dst_desc.value, data, pos, out);
+      return;
+    case NodeKind::Array:
+      align_vector(out, cdr_alignment_for_write(*dst_desc.sub, dst_store));
+      for (int idx = 0; idx < dst_desc.bound; ++idx) {
+        convert_ros1_value_to_cdr(src_store, dst_store, *src_desc.sub, *dst_desc.sub, data, pos, out);
+      }
+      return;
+    case NodeKind::Sequence: {
+      const auto size = read_le<std::uint32_t>(data, pos);
+      align_vector(out, 4);
+      append_le<std::uint32_t>(out, size);
+      if (src_desc.sub &&
+          dst_desc.sub &&
+          src_desc.sub->kind == NodeKind::Name &&
+          dst_desc.sub->kind == NodeKind::Name) {
+        auto item_size = plain_static_size_message(
+            src_store,
+            dst_store,
+            src_desc.sub->value,
+            dst_desc.sub->value);
+        if (item_size) {
+          const auto item_align = cdr_align_before_desc(*dst_desc.sub, dst_store);
+          out.reserve(out.size() + static_cast<std::size_t>(size) * (*item_size + item_align - 1));
+          for (std::uint32_t idx = 0; idx < size; ++idx) {
+            align_vector(out, item_align);
+            if (pos + *item_size > data.size()) {
+              throw Error("Unexpected end of ROS1 value");
+            }
+            const auto out_pos = out.size();
+            out.resize(out_pos + *item_size);
+            std::memcpy(out.data() + out_pos, data.data() + pos, *item_size);
+            pos += *item_size;
+          }
+          return;
+        }
+      }
+      if (size != 0) {
+        align_vector(out, cdr_alignment_for_write(*dst_desc.sub, dst_store));
+      }
+      for (std::uint32_t idx = 0; idx < size; ++idx) {
+        convert_ros1_value_to_cdr(src_store, dst_store, *src_desc.sub, *dst_desc.sub, data, pos, out);
+      }
+      return;
+    }
+  }
+}
+
+auto ros1_to_cdr_fast(
+    const std::shared_ptr<detail::TypestoreState>& src_store,
+    const std::shared_ptr<detail::TypestoreState>& dst_store,
+    const std::vector<std::uint8_t>& data,
+    const std::string& src_msgtype,
+    const std::string& dst_msgtype) -> std::vector<std::uint8_t> {
+  std::vector<std::uint8_t> body;
+  body.reserve(data.size() + 16);
+  std::size_t pos = 0;
+  convert_ros1_message_to_cdr(
+      src_store,
+      dst_store,
+      normalize_msgtype(src_msgtype),
+      normalize_msgtype(dst_msgtype),
+      data,
+      pos,
+      body);
+  if (pos != data.size()) {
+    throw Error("ROS1 to CDR converter did not consume all bytes");
+  }
+  std::vector<std::uint8_t> out;
+  out.reserve(body.size() + 4);
+  out.insert(out.end(), {0, 1, 0, 0});
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
 }
 
 auto type_id_for_desc(
@@ -3010,6 +3587,42 @@ auto Typestore::serialize_raw(const TypedMessage& message, BagFormat format) con
   return format == BagFormat::Rosbag1 ? serialize_ros1(message) : serialize_cdr(message);
 }
 
+auto Typestore::migrate(
+    const TypedMessage& source,
+    const Typestore& source_typestore,
+    const std::string& dst_msgtype) const -> TypedMessage {
+  (void)require_typestore_state(state_);
+  (void)require_typestore_state(detail::typestore_state(source_typestore));
+  return migrate_message_state(
+      state_,
+      detail::typestore_state(source_typestore),
+      dst_msgtype,
+      source);
+}
+
+auto Typestore::convert_raw(
+    const std::vector<std::uint8_t>& data,
+    const std::string& src_msgtype,
+    const Typestore& source_typestore,
+    BagFormat src_format,
+    const std::string& dst_msgtype,
+    BagFormat dst_format) const -> std::vector<std::uint8_t> {
+  if (src_format == BagFormat::Rosbag1 && dst_format == BagFormat::Rosbag2) {
+    std::set<std::pair<std::string, std::string>> active;
+    auto source_state = detail::typestore_state(source_typestore);
+    if (can_fast_convert_message_ros1_to_cdr(
+            source_state,
+            state_,
+            src_msgtype,
+            dst_msgtype,
+            active)) {
+      return ros1_to_cdr_fast(source_state, state_, data, src_msgtype, dst_msgtype);
+    }
+  }
+  auto source = source_typestore.deserialize_raw(data, src_msgtype, src_format);
+  return serialize_raw(migrate(source, source_typestore, dst_msgtype), dst_format);
+}
+
 auto Typestore::ros1_to_cdr(
     const std::vector<std::uint8_t>& data,
     const std::string& msgtype) const -> std::vector<std::uint8_t> {
@@ -3274,11 +3887,25 @@ void Writer::close() {
   } else if (state_->options.storage == StoragePlugin::Sqlite3) {
     const auto metadata = make_metadata_yaml(*state_, state_->storage_path);
     sqlite3_stmt* stmt = nullptr;
-    sqlite3_prepare_v2(state_->sqlite, "INSERT INTO metadata(metadata_version, metadata) VALUES(?, ?)", -1, &stmt, nullptr);
+    if (sqlite3_prepare_v2(
+            state_->sqlite,
+            "INSERT INTO metadata(metadata_version, metadata) VALUES(?, ?)",
+            -1,
+            &stmt,
+            nullptr) != SQLITE_OK) {
+      throw Error("Could not prepare sqlite3 metadata insert");
+    }
     sqlite3_bind_int(stmt, 1, state_->options.rosbag2_version);
     sqlite_bind_text(stmt, 2, metadata);
-    sqlite3_step(stmt);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+      sqlite3_finalize(stmt);
+      throw Error("Could not write sqlite3 metadata");
+    }
     sqlite3_finalize(stmt);
+    if (state_->sqlite_insert_message) {
+      sqlite3_finalize(state_->sqlite_insert_message);
+      state_->sqlite_insert_message = nullptr;
+    }
     if (!state_->connections.empty()) {
       sqlite_exec(state_->sqlite, "COMMIT;");
     }
@@ -3403,13 +4030,31 @@ void Writer::write(
     if (state_->options.compression_mode == CompressionMode::Message) {
       payload = zstd_compress(payload);
     }
-    sqlite3_stmt* stmt = nullptr;
-    sqlite3_prepare_v2(state_->sqlite, "INSERT INTO messages (topic_id, timestamp, data) VALUES(?, ?, ?)", -1, &stmt, nullptr);
-    sqlite3_bind_int(stmt, 1, conn.id);
-    sqlite3_bind_int64(stmt, 2, timestamp);
-    sqlite3_bind_blob(stmt, 3, payload.data(), static_cast<int>(payload.size()), SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    if (!state_->sqlite_insert_message) {
+      if (sqlite3_prepare_v2(
+          state_->sqlite,
+          "INSERT INTO messages (topic_id, timestamp, data) VALUES(?, ?, ?)",
+          -1,
+          &state_->sqlite_insert_message,
+          nullptr) != SQLITE_OK) {
+        throw Error("Could not prepare sqlite3 message insert");
+      }
+    }
+    sqlite3_bind_int(state_->sqlite_insert_message, 1, conn.id);
+    sqlite3_bind_int64(state_->sqlite_insert_message, 2, timestamp);
+    sqlite3_bind_blob(
+        state_->sqlite_insert_message,
+        3,
+        payload.data(),
+        static_cast<int>(payload.size()),
+        SQLITE_TRANSIENT);
+    if (sqlite3_step(state_->sqlite_insert_message) != SQLITE_DONE) {
+      sqlite3_reset(state_->sqlite_insert_message);
+      sqlite3_clear_bindings(state_->sqlite_insert_message);
+      throw Error("Could not write sqlite3 message");
+    }
+    sqlite3_reset(state_->sqlite_insert_message);
+    sqlite3_clear_bindings(state_->sqlite_insert_message);
   } else {
     auto payload = data;
     if (state_->options.compression_mode == CompressionMode::Message) {

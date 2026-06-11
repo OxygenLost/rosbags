@@ -1,3 +1,6 @@
+# Copyright 2020-2026 Ternaris
+# SPDX-License-Identifier: Apache-2.0
+
 # Livox publish pointcloud msg format.
 
 std_msgs/Header header    # ROS standard message header

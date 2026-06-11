@@ -1,3 +1,6 @@
+# Copyright 2020-2026 Ternaris
+# SPDX-License-Identifier: Apache-2.0
+
 cmake_minimum_required(VERSION 3.18)
 
 project(rosbags_cpp VERSION 0.2.0 LANGUAGES CXX)
@@ -30,7 +33,7 @@ target_include_directories(
 target_link_libraries(
   rosbags_cpp
   PRIVATE
-    SQLite3::SQLite3
+    SQLite::SQLite3
     OpenSSL::Crypto
     BZip2::BZip2
     ${YAML_CPP_LINK_LIBRARIES}
@@ -68,6 +71,9 @@ if(ROSBAGS_CPP_BUILD_EXAMPLES)
 
   add_executable(rosbags_cpp_bench_raw examples/bench_raw.cpp)
   target_link_libraries(rosbags_cpp_bench_raw PRIVATE rosbags_cpp::rosbags_cpp)
+
+  add_executable(rosbags_cpp_convert examples/convert.cpp)
+  target_link_libraries(rosbags_cpp_convert PRIVATE rosbags_cpp::rosbags_cpp)
 endif()
 
 option(ROSBAGS_CPP_BUILD_TESTS "Build rosbags C++ integration tests" OFF)

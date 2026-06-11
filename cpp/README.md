@@ -1,3 +1,8 @@
+<!--
+Copyright 2020-2026 Ternaris
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # rosbags C++ API
 
 This directory contains a native C++17 API for reading and writing rosbag
@@ -343,6 +348,18 @@ Copy a bag without converting serialization formats:
 ./build/cpp/rosbags_cpp_copy_raw /path/to/src.bag /path/to/dst.bag
 ```
 
+Convert a ROS1 bag to a ROS2 sqlite3 bag, registering custom ROS2 message
+definitions when needed:
+
+```sh
+./build/cpp/rosbags_cpp_convert \
+  /path/to/src.bag \
+  /path/to/dst_ros2 \
+  0 \
+  livox_ros_driver2/msg/CustomPoint=msg/livox_ros_driver2/CustomPoint.msg \
+  livox_ros_driver2/msg/CustomMsg=msg/livox_ros_driver2/CustomMsg.msg
+```
+
 Benchmark raw iteration, optionally forcing typed deserialization for selected
 topics:
 
@@ -353,7 +370,7 @@ topics:
 ## Notes And Limits
 
 - The C++ API intentionally does not run the Python CLI converter.
-- Raw copying keeps the source wire format. Use typed deserialization plus typed
-  writing if you need to convert ROS1 bytes to CDR bytes or the reverse.
+- Raw copying keeps the source wire format. Use `Typestore::convert_raw()` or
+  `rosbags_cpp_convert` if you need to convert ROS1 bytes to CDR bytes.
 - Built-in typestore presets are compiled into
   `cpp/src/generated_typestores.inc`; normal builds do not generate this file.

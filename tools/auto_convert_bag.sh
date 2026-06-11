@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright 2020-2026 Ternaris
+# SPDX-License-Identifier: Apache-2.0
 
 # Script to auto-detect ROS bag version and convert it to the other version (ROS1 <-> ROS2)
 
